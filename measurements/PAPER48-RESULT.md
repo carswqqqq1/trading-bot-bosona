@@ -42,6 +42,12 @@ combined disadvantage of **$0.39716** versus the same shares at the source price
 Bosona's actual maker/taker fee role is unknown. Spread, liquidity, size, and
 price movement all contribute; this does not isolate causal latency loss.
 
+The hourly position's entry cost was $2.39879 and its final fee-adjusted bid
+quote was $4.09746: **+$1.69867 unrealized for this fresh copy**. The other
+$1.35489 of the account's quoted gain belonged to the older restart position.
+Neither position was sold. These are the recorded test-end quotes, not current
+prices or settled winnings.
+
 ## Restart caveat and subsequent fix
 
 The other paper BUY came from a 17.391-second-old restart signal, buying 7.62
@@ -55,3 +61,10 @@ Thus **the +$3.05 snapshot does not establish profitability of fast copying**.
 There were no live SELL samples, no Future execution, and too few fills for a
 strategy conclusion. A further clean run should use the current code and a
 fresh database, with the same sizing unless a different paper policy is chosen.
+
+## Clean run after the fix
+
+A fresh $48 account ran for another 90 seconds with the corrected code, starting
+at 23:00:55 UTC. It saw no new qualifying source trades and finished at $48,
+with no fills or fees. [Clean run log](paper48-clean-2026-09-30.jsonl).
+This verifies the run path but adds no profitability evidence.

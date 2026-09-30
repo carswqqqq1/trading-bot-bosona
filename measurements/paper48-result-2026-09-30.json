@@ -109,5 +109,36 @@
       }
     }
   ],
-  "restart_caveat": "Third capture copied a 17.391-second-old startup backlog BUY. Current code skips such copies; this result is not a clean fast-latency profitability experiment."
+  "restart_caveat": "Third capture copied a 17.391-second-old startup backlog BUY. Current code skips such copies; this result is not a clean fast-latency profitability experiment.",
+  "clean_post_fix_run": {
+    "portfolio": {
+      "status": "PORTFOLIO",
+      "cash_usd": "48",
+      "positions": [],
+      "unresolved_positions": 0,
+      "quoted_liquidation_usd": "0",
+      "settlement_simulated": false,
+      "total_simulated_fees_usd": "0",
+      "source_price_slippage_cost_usd": "0",
+      "fee_delta_vs_hypothetical_source_price_usd": "0",
+      "hypothetical_source_fee_assumption": "Same quantity and taker fee schedule at leader price; actual leader fees unknown.",
+      "realized_pnl_usd": "0",
+      "open_cost_usd": "0",
+      "simulated_fills": 0,
+      "slippage_interpretation": "Price difference at observed snapshot; not a causal latency estimate.",
+      "unrealized_pnl_at_liquidation_quote_usd": "0",
+      "equity_at_liquidation_quote_usd": "48",
+      "change_from_start_usd": "0"
+    },
+    "summary": {
+      "status": "SUMMARY",
+      "duration_seconds": 90.0,
+      "observations": 0,
+      "continuous_run_latency_samples": 0,
+      "first_seen_delay_min_seconds": null,
+      "first_seen_delay_max_seconds": null,
+      "note": "Snapshot depth simulations; no live fills, settlement or guaranteed execution latency."
+    }
+  },
+  "fresh_hourly_position_unrealized_pnl_at_test_end_usd": "1.69867"
 }
