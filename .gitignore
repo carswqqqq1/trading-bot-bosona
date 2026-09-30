@@ -3,5 +3,7 @@ config.json
 *.sqlite3-*
 __pycache__/
 latency*.jsonl
+paper*.jsonl
+!measurements/*.jsonl
 .env
 .env.*

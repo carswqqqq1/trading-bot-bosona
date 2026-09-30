@@ -1,0 +1,65 @@
+{
+  "matched_unambiguous_trades": 8,
+  "pairs": [
+    {
+      "source_transaction": "0x0710254ab240ddcfed26446f49b656319b025bb61bdfccecebcf347ec1aa0957",
+      "side": "BUY",
+      "baseline_delay_seconds": 1.632,
+      "faster_delay_seconds": 1.317,
+      "earlier_detection_seconds": 0.315
+    },
+    {
+      "source_transaction": "0xfe1b172588792fd9b5eb86dab0ff34e4b1dcb4d6e095c98287a22d95d3ea3900",
+      "side": "BUY",
+      "baseline_delay_seconds": 3.632,
+      "faster_delay_seconds": 1.614,
+      "earlier_detection_seconds": 2.018
+    },
+    {
+      "source_transaction": "0x09bf726782ea6208d898bdd17e12af9627012b41794720698fa461ee22e3dce6",
+      "side": "BUY",
+      "baseline_delay_seconds": 2.154,
+      "faster_delay_seconds": 1.611,
+      "earlier_detection_seconds": 0.543
+    },
+    {
+      "source_transaction": "0xbe7aa933b5f72a994d2612267ef650eac7375c1fe803d672baedee7331c2b967",
+      "side": "BUY",
+      "baseline_delay_seconds": 4.154,
+      "faster_delay_seconds": 2.598,
+      "earlier_detection_seconds": 1.556
+    },
+    {
+      "source_transaction": "0xeed722dd7c51565fb3966cfe1fed1f74c87ff959f9fc8080f8d6e18ebbf4ae52",
+      "side": "BUY",
+      "baseline_delay_seconds": 4.154,
+      "faster_delay_seconds": 2.598,
+      "earlier_detection_seconds": 1.556
+    },
+    {
+      "source_transaction": "0x948a32a13a5d015906ab8883e1d2ea7bafb6553e6a95c220b9c8d740cd53e266",
+      "side": "BUY",
+      "baseline_delay_seconds": 2.154,
+      "faster_delay_seconds": 1.611,
+      "earlier_detection_seconds": 0.543
+    },
+    {
+      "source_transaction": "0xd7355cceb191f2286c63d5ecdebd637b4aefdb7a8c89c68cc26ccac5d8384780",
+      "side": "BUY",
+      "baseline_delay_seconds": 2.154,
+      "faster_delay_seconds": 1.611,
+      "earlier_detection_seconds": 0.543
+    },
+    {
+      "source_transaction": "0xc068950bce04b0c678e058702d9cbf88ba0a24aede83cf12f522f78d86f1bf82",
+      "side": "BUY",
+      "baseline_delay_seconds": 1.632,
+      "faster_delay_seconds": 1.317,
+      "earlier_detection_seconds": 0.315
+    }
+  ],
+  "measured_execution_latency": false,
+  "baseline_median_seconds": 2.154,
+  "faster_median_seconds": 1.611,
+  "median_earlier_detection_seconds": 0.543
+}

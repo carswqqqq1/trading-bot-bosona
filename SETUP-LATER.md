@@ -9,6 +9,18 @@
    Repeat during active trading if the run produces no new trades.
 5. Select the allowed BTC timeframes and latency tolerance from observed results.
 
+For the $48 cash-and-inventory simulation, run:
+
+```bash
+python paper.py --config config.paper48.json --duration 120 --db paper48.sqlite3 --output paper48.jsonl
+```
+
+The chosen caps are $2.40 per BUY/outcome and $9.60 total open cost, including
+simulated fees. The runner watches both BUYs and SELLs with a 0.5-second target
+poll interval, and simulates current executable depth when constraints permit.
+Read the final `PORTFOLIO` record; unresolved holdings prevent a total PnL
+estimate. An account API key is unnecessary for this paper stage.
+
 No wallet connection or funding is required for this stage. Example trade
 amounts in the config are paper values. The measurement observes public
 activity and cannot submit orders.
@@ -21,7 +33,7 @@ Information needed: public Future trading wallet, wallet type and supported
 signer method, official API/account integration guidance, desired BUY sizing,
 daily exposure/loss caps, and SELL behavior.
 
-Before live copying, implement follower inventory, bounded BUY and SELL orders,
+Before live copying, connect the tested paper inventory logic to bounded live BUY and SELL orders,
 fees, durable order IDs and timeout reconciliation, fill/settlement tracking,
 position limits, and an emergency stop. Prove that externally placed orders
 appear in the intended Future account. A generic separate Polymarket wallet

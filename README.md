@@ -11,6 +11,9 @@ Future.news integration is pending confirmation of the intended execution venue
 and its supported authentication/API. SELLs are recorded as observations; they
 require follower inventory tracking before automated exits can be implemented.
 
+`paper.py` adds a separate cash-and-inventory simulator for both BUYs and SELLs,
+using a $48 paper balance. It uses current Polymarket quotes, not Future orders.
+
 ## Run
 
 Python 3.10+; standard library only.
@@ -29,6 +32,8 @@ python -m unittest discover -s tests -v
 python demo.py  # Synthetic example; works without network or a wallet.
 python bot.py --config config.bosona.paper.json --once
 python latency.py --duration 1800 --output latency.jsonl
+python latency.py --poll-seconds 0.5 --duration 180 --output latency-fast.jsonl
+python paper.py --duration 120 --db paper48.sqlite3 --output paper48.jsonl
 ```
 
 Use the trader's actual Polymarket trading/proxy wallet, not necessarily their
@@ -69,7 +74,14 @@ indexing, polling interval, and request time. It is not exchange matching
 latency, Future execution latency, or a guarantee about future performance.
 No samples means no estimate. Each run creates a fresh baseline and overwrites
 the chosen output file. Use a new filename to preserve earlier runs.
-The lookback starts one hour before launch and remains fixed during that run.
+The startup baseline covers the preceding hour of activity.
+
+After startup, latency observation fetches the latest 120 seconds of source
+activity; publication delayed beyond that window is missed. The faster option
+schedules request starts rather than adding sleep after request completion.
+Errors back off to at least two seconds. A paired live sample of eight BUYs
+reduced median public detection delay from 2.154 to 1.611 seconds; this short
+sample establishes neither typical latency nor SELL latency. See `measurements`.
 
 Hourly timing comes from Gamma's timezone-aware `eventStartTime` and `endDate`,
 not the market creation date or a guessed offset for the ET market slug.
@@ -93,3 +105,36 @@ live end-to-end proposal generation has not been verified. Tests use
 representative documented responses. Future's public site references
 Polymarket markets/account imports; that does not establish a supported
 third-party order API. See [Future integration findings](FUTURE-INTEGRATION.md).
+
+## $48 paper portfolio
+
+`config.paper48.json` starts with $48, caps each BUY and outcome's fee-inclusive
+open cost at $2.40, and caps total open cost at $9.60. This is the chosen test
+sizing, not a guarantee of suitable risk or profitability. Minimum share sizes
+can cause skips. The simulator consumes current ask depth for BUYs and bid depth
+for SELLs, with a two-cent maximum adverse price difference from the leader.
+It makes concurrent market/book requests after detecting the source trade.
+
+Fees use the current market's `feesEnabled` and `feeSchedule`, requiring the
+documented exponent-one formula `shares × rate × price × (1-price)`. Unknown fee
+schedules cause skips. Fees round per consumed price level in the simulation;
+actual fills may have different fee rounding, depth, and available prices.
+
+SELLs close the same fraction of copied holdings as the source sells of its
+inventory observed during the session. Source BUY quantities are tracked even
+when a follower BUY is skipped. Earlier leader holdings are unknown: unmatched
+SELLs are refused, and tiny partial exits can be below the market minimum.
+Positions that expire or cannot be quoted remain unresolved; automatic
+settlement/redemption is not simulated. Total PnL is omitted if any holding
+cannot be valued. A liquidation quote is a snapshot, not a realized fill.
+
+`source_price_slippage_cost_usd` compares the same copied share quantity at the
+simulated VWAP versus the leader's source fill: positive means a disadvantage,
+negative an improvement. It does not isolate latency from spread, liquidity,
+order size, or other effects. `fee_delta_vs_hypothetical_source_price_usd`
+compares simulated fees with hypothetical same-quantity taker fees at the source
+price; the leader's actual fee role is unknown. Portfolio output separates
+cash, fees, realized PnL, available liquidation marks, and unresolved inventory.
+
+Use a fresh database for a new independent $48 test. Reusing a database resumes
+cash, inventory, and duplicate protection. JSONL output appends between runs.

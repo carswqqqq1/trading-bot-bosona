@@ -25,6 +25,7 @@ def observe(rows, seen, config, received_at, request_seconds):
         observations.append({
             "status": "OBSERVED", "side": row["side"], "outcome": row.get("outcome"),
             "slug": row["slug"], "source_transaction": row["transaction_hash"],
+            "source_event_key": key,
             "source_timestamp_seconds": source,
             "first_seen_at_utc": datetime.fromtimestamp(received_at, timezone.utc).isoformat(),
             "source_to_first_seen_seconds": round(delay, 3),
@@ -57,10 +58,16 @@ def main():
     parser.add_argument("--config", default="config.bosona.paper.json")
     parser.add_argument("--duration", type=float, default=60)
     parser.add_argument("--output", default="latency.jsonl")
+    parser.add_argument("--poll-seconds", type=float, default=None,
+                        help="Override polling interval; minimum 0.25 seconds")
     args = parser.parse_args()
     if not math.isfinite(args.duration) or args.duration <= 0:
         parser.error("--duration must be positive and finite")
     config = validate(json.loads(Path(args.config).read_text()))
+    if args.poll_seconds is not None:
+        if not math.isfinite(args.poll_seconds) or args.poll_seconds < 0.25:
+            parser.error("--poll-seconds must be finite and at least 0.25")
+        config["poll_seconds"] = args.poll_seconds
     seen, observations = set(), []
     started = time.monotonic()
     # Fixed lookback start makes identical-row multiplicity stable across polls.
@@ -77,19 +84,24 @@ def main():
         emit({"status": "STARTED", "leader_wallet": config["leader_wallet"],
               "baseline_rows_excluded": len(baseline),
               "poll_seconds": config["poll_seconds"],
+              "incremental_lookback_seconds": 120,
               "timestamp_precision_seconds": 1,
               "measurement": "source block timestamp to first successful public observation"})
         try:
+            next_poll = time.monotonic() + config["poll_seconds"]
             while time.monotonic() - started < args.duration:
                 remaining = args.duration - (time.monotonic() - started)
-                time.sleep(min(config["poll_seconds"], max(0, remaining)))
+                time.sleep(min(max(0, next_poll - time.monotonic()), max(0, remaining)))
                 if time.monotonic() - started >= args.duration:
                     break
                 request_started = time.monotonic()
+                next_poll = request_started + config["poll_seconds"]
                 try:
-                    rows = activity(config["leader_wallet"], source_start, int(time.time()))
+                    end = int(time.time())
+                    rows = activity(config["leader_wallet"], max(source_start, end - 120), end)
                 except Exception as exc:
                     emit({"status": "ERROR", "message": str(exc)})
+                    next_poll = time.monotonic() + max(2, config["poll_seconds"])
                     continue
                 received_at = time.time()
                 samples = observe(rows, seen, config, received_at,

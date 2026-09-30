@@ -13,3 +13,17 @@ one-second source timestamp precision. They include indexing, polling, and
 HTTP request time. Three trades in one short period are insufficient to
 estimate typical latency or SELL latency. No follower order was placed, and
 Future execution latency was not measured.
+
+## Faster polling comparison
+
+The [paired comparison](latency-comparison-2026-09-30.json) matches the same
+eight unambiguous BUY trades from simultaneous public monitors. Median
+source-to-observation delay was 2.154 seconds for the original two-second
+polling loop versus 1.611 seconds for a 0.5-second request schedule with a
+120-second incremental activity window. Median earlier detection: 0.543 seconds.
+
+[Baseline capture](latency-baseline-2026-09-30.jsonl) and
+[faster capture](latency-fast-2026-09-30.jsonl) preserve the raw observations.
+The baseline capture is a snapshot of a longer running monitor. Comparisons
+exclude transactions with ambiguous repeated records. No SELL samples were
+captured in the three-minute faster run, and no Future order was submitted.

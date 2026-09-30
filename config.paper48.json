@@ -1,0 +1,16 @@
+{
+  "leader_wallet": "0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed",
+  "timeframes_minutes": [5, 15, 60],
+  "copy_ratio": "0.05",
+  "max_trade_usd": "2.40",
+  "max_daily_proposed_usd": "48",
+  "max_price_drift": "0.02",
+  "max_signal_age_seconds": 20,
+  "min_seconds_to_expiry": 5,
+  "poll_seconds": 0.5,
+  "starting_cash_usd": "48",
+  "max_buy_usd": "2.40",
+  "max_open_cost_usd": "9.60",
+  "max_outcome_cost_usd": "2.40",
+  "max_book_age_seconds": 5
+}
