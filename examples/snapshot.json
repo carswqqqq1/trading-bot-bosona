@@ -1,0 +1,65 @@
+{
+  "now": 1790805660,
+  "config": {
+    "leader_wallet": "0x1111111111111111111111111111111111111111",
+    "timeframes_minutes": [
+      5,
+      15
+    ],
+    "copy_ratio": "0.10",
+    "max_trade_usd": "5",
+    "max_daily_proposed_usd": "25",
+    "max_price_drift": "0.02",
+    "max_signal_age_seconds": 20,
+    "min_seconds_to_expiry": 30,
+    "poll_seconds": 2
+  },
+  "trade": {
+    "proxy_wallet": "0x1111111111111111111111111111111111111111",
+    "type": "TRADE",
+    "timestamp": 1790805657,
+    "transaction_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "condition_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "slug": "btc-updown-5m-1790805600",
+    "token_id": "123",
+    "side": "BUY",
+    "outcome": "Up",
+    "size": 100,
+    "price": 0.5,
+    "usdc_size": 50
+  },
+  "market": {
+    "slug": "btc-updown-5m-1790805600",
+    "conditionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "active": true,
+    "closed": false,
+    "acceptingOrders": true,
+    "archived": false,
+    "endDate": "2026-09-30T22:05:00+00:00",
+    "clobTokenIds": "[\"123\", \"456\"]",
+    "outcomes": "[\"Up\", \"Down\"]"
+  },
+  "book": {
+    "asset_id": "123",
+    "market": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "timestamp": "1790805660000",
+    "min_order_size": "5",
+    "tick_size": "0.01",
+    "asks": [
+      {
+        "price": "0.54",
+        "size": "200"
+      },
+      {
+        "price": "0.51",
+        "size": "30"
+      }
+    ],
+    "bids": [
+      {
+        "price": "0.49",
+        "size": "40"
+      }
+    ]
+  }
+}

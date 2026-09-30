@@ -1,0 +1,15 @@
+{
+  "leader_wallet": "REPLACE_WITH_PUBLIC_TRADING_WALLET",
+  "timeframes_minutes": [
+    5,
+    15,
+    60
+  ],
+  "copy_ratio": "0.10",
+  "max_trade_usd": "5",
+  "max_daily_proposed_usd": "25",
+  "max_price_drift": "0.02",
+  "max_signal_age_seconds": 20,
+  "min_seconds_to_expiry": 30,
+  "poll_seconds": 2
+}
