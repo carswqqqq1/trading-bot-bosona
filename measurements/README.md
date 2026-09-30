@@ -27,3 +27,11 @@ polling loop versus 1.611 seconds for a 0.5-second request schedule with a
 The baseline capture is a snapshot of a longer running monitor. Comparisons
 exclude transactions with ambiguous repeated records. No SELL samples were
 captured in the three-minute faster run, and no Future order was submitted.
+
+## $48 paper account result
+
+See [the paper validation report](PAPER48-RESULT.md). Its final quote showed
+$51.05356 total equity, including $3.05356 unrealized gain, two paper BUYs and
+no SELL fills. One BUY came from an older restart signal; the report separates
+that caveat and explains the subsequent fix. This is not a proof of fast-copy
+profitability.

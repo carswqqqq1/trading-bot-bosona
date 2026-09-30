@@ -158,6 +158,14 @@ class PaperJournalTests(unittest.TestCase):
         self.assertEqual(restarted.cash, cash_after_buy)
         self.assertEqual(restarted.holdings()[TOKEN_UP]["shares"], Decimal(first["shares"]))
 
+    def test_resume_backlog_tracks_source_without_copying_old_trade(self):
+        result=self.journal.process("backlog",row(),None,None,NOW,skip_reason="resume_backlog_not_copied")
+        self.assertEqual(result["status"],"SKIP")
+        self.assertEqual(result["reason"],"resume_backlog_not_copied")
+        self.assertEqual(self.journal.cash,Decimal("48"))
+        self.assertEqual(self.journal.holdings()[TOKEN_UP]["leader_shares"],Decimal("100"))
+        self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"],0)
+
     def test_market_minimum_causes_skip_without_exceeding_cash_or_cost_cap(self):
         constrained = book(min_order_size="5")
         result = self.journal.process("buy-too-small", row(), market(), constrained, NOW)
@@ -181,6 +189,26 @@ class PaperJournalTests(unittest.TestCase):
         self.assertEqual(second["status"], "SKIP")
         self.assertGreaterEqual(capped.cash, 0)
         self.assertLessEqual(sum((p["cost"] for p in capped.holdings().values()), Decimal(0)), Decimal("2.40"))
+
+    def test_optional_minimum_size_allowance_buys_only_required_quantity(self):
+        policy = config(target_buy_usd="2.40",max_buy_usd="4.80",max_outcome_cost_usd="4.80")
+        journal = paper.PaperJournal(Path(self.tmp.name)/"minimum.sqlite",policy)
+        self.addCleanup(journal.db.close)
+        result = journal.process("minimum",row(price="0.70"),market(),
+                                 book(min_order_size="5",asks=[{"price":"0.70","size":"100"}]),NOW)
+        self.assertEqual(result["status"],"PAPER_BUY")
+        self.assertEqual(Decimal(result["shares"]),Decimal("5"))
+        self.assertLessEqual(Decimal(result["gross"])+Decimal(result["fee"]),Decimal("4.80"))
+
+    def test_minimum_allowance_cannot_exceed_hard_cap(self):
+        policy = config(target_buy_usd="2.40",max_buy_usd="4.80",max_outcome_cost_usd="4.80")
+        journal = paper.PaperJournal(Path(self.tmp.name)/"unaffordable.sqlite",policy)
+        self.addCleanup(journal.db.close)
+        result = journal.process("expensive",row(price="0.97"),market(),
+                                 book(min_order_size="5",asks=[{"price":"0.97","size":"100"}]),NOW)
+        self.assertEqual(result["status"],"SKIP")
+        self.assertEqual(journal.cash,Decimal("48"))
+        self.assertFalse(result["minimum_size_price_comparison"]["executed"])
 
     def test_stale_book_and_closed_market_are_skipped_without_debit(self):
         stale = self.journal.process("stale", row(), market(), book(timestamp=(NOW - 6) * 1000), NOW)

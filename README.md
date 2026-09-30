@@ -138,3 +138,13 @@ cash, fees, realized PnL, available liquidation marks, and unresolved inventory.
 
 Use a fresh database for a new independent $48 test. Reusing a database resumes
 cash, inventory, and duplicate protection. JSONL output appends between runs.
+On restart, trades whose source timestamp predates the current run are tracked
+for source inventory but are skipped for copying and continuous-run latency
+statistics. An early validation capture copied one 17-second-old restart trade;
+that capture is explicitly separated from normal fast-detection observations.
+
+An optional `target_buy_usd` can set a soft target below `max_buy_usd`: only the
+minimum required quantity is allowed above that target, and only within the
+hard BUY, outcome, cash, and total exposure caps. The default $48 policy keeps
+the $2.40 hard cap. Skipped trades can include a hypothetical minimum-size quote
+comparison, which does not count as an account fill or change the balance.

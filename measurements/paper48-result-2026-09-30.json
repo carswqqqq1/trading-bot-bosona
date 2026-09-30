@@ -1,0 +1,113 @@
+{
+  "paper_only": true,
+  "future_execution": false,
+  "captures": [
+    {
+      "run": 1,
+      "portfolio": {
+        "status": "PORTFOLIO",
+        "cash_usd": "48",
+        "positions": [],
+        "unresolved_positions": 0,
+        "quoted_liquidation_usd": "0",
+        "settlement_simulated": false,
+        "total_simulated_fees_usd": "0",
+        "source_price_slippage_cost_usd": "0",
+        "fee_delta_vs_hypothetical_source_price_usd": "0",
+        "hypothetical_source_fee_assumption": "Same quantity and taker fee schedule at leader price; actual leader fees unknown.",
+        "realized_pnl_usd": "0",
+        "open_cost_usd": "0",
+        "simulated_fills": 0,
+        "slippage_interpretation": "Price difference at observed snapshot; not a causal latency estimate.",
+        "unrealized_pnl_at_liquidation_quote_usd": "0",
+        "equity_at_liquidation_quote_usd": "48",
+        "change_from_start_usd": "0"
+      },
+      "summary": {
+        "status": "SUMMARY",
+        "duration_seconds": 120.0,
+        "observations": 0,
+        "first_seen_delay_min_seconds": null,
+        "first_seen_delay_max_seconds": null,
+        "note": "Snapshot depth simulations; no live fills, settlement or guaranteed execution latency."
+      }
+    },
+    {
+      "run": 2,
+      "portfolio": {
+        "status": "PORTFOLIO",
+        "cash_usd": "48",
+        "positions": [],
+        "unresolved_positions": 0,
+        "quoted_liquidation_usd": "0",
+        "settlement_simulated": false,
+        "total_simulated_fees_usd": "0",
+        "source_price_slippage_cost_usd": "0",
+        "fee_delta_vs_hypothetical_source_price_usd": "0",
+        "hypothetical_source_fee_assumption": "Same quantity and taker fee schedule at leader price; actual leader fees unknown.",
+        "realized_pnl_usd": "0",
+        "open_cost_usd": "0",
+        "simulated_fills": 0,
+        "slippage_interpretation": "Price difference at observed snapshot; not a causal latency estimate.",
+        "unrealized_pnl_at_liquidation_quote_usd": "0",
+        "equity_at_liquidation_quote_usd": "48",
+        "change_from_start_usd": "0"
+      },
+      "summary": {
+        "status": "SUMMARY",
+        "duration_seconds": 300.18,
+        "observations": 19,
+        "first_seen_delay_min_seconds": 0.9228184223175049,
+        "first_seen_delay_max_seconds": 64.39028811454773,
+        "note": "Snapshot depth simulations; no live fills, settlement or guaranteed execution latency."
+      }
+    },
+    {
+      "run": 3,
+      "portfolio": {
+        "status": "PORTFOLIO",
+        "cash_usd": "43.20320",
+        "positions": [
+          {
+            "token_id": "43967390264182515829437726543213766643178026614417733513937487771186715215639",
+            "slug": "btc-updown-5m-1790808900",
+            "shares": "7.62",
+            "cost_usd": "2.39801",
+            "liquidation_quote_usd": "3.75290"
+          },
+          {
+            "token_id": "98347256143946483582770358650184390978806140241658289540366631052306485766060",
+            "slug": "bitcoin-up-or-down-september-30-2026-6pm-et",
+            "shares": "18.83",
+            "cost_usd": "2.39879",
+            "liquidation_quote_usd": "4.09746"
+          }
+        ],
+        "unresolved_positions": 0,
+        "quoted_liquidation_usd": "7.85036",
+        "settlement_simulated": false,
+        "total_simulated_fees_usd": "0.25120",
+        "source_price_slippage_cost_usd": "-1.223600006858",
+        "fee_delta_vs_hypothetical_source_price_usd": "-0.00073",
+        "hypothetical_source_fee_assumption": "Same quantity and taker fee schedule at leader price; actual leader fees unknown.",
+        "realized_pnl_usd": "0",
+        "open_cost_usd": "4.79680",
+        "simulated_fills": 2,
+        "slippage_interpretation": "Price difference at observed snapshot; not a causal latency estimate.",
+        "unrealized_pnl_at_liquidation_quote_usd": "3.05356",
+        "equity_at_liquidation_quote_usd": "51.05356",
+        "change_from_start_usd": "3.05356"
+      },
+      "summary": {
+        "status": "SUMMARY",
+        "duration_seconds": 90.67,
+        "observations": 8,
+        "continuous_run_latency_samples": 3,
+        "first_seen_delay_min_seconds": 1.262756109237671,
+        "first_seen_delay_max_seconds": 1.5028529167175293,
+        "note": "Snapshot depth simulations; no live fills, settlement or guaranteed execution latency."
+      }
+    }
+  ],
+  "restart_caveat": "Third capture copied a 17.391-second-old startup backlog BUY. Current code skips such copies; this result is not a clean fast-latency profitability experiment."
+}

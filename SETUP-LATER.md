@@ -20,6 +20,9 @@ simulated fees. The runner watches both BUYs and SELLs with a 0.5-second target
 poll interval, and simulates current executable depth when constraints permit.
 Read the final `PORTFOLIO` record; unresolved holdings prevent a total PnL
 estimate. An account API key is unnecessary for this paper stage.
+Use a fresh database for a clean test of the current runner: older validation
+captures include a restart trade that the corrected runner now skips.
+See [recorded $48 results](measurements/PAPER48-RESULT.md).
 
 No wallet connection or funding is required for this stage. Example trade
 amounts in the config are paper values. The measurement observes public

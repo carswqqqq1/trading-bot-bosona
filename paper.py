@@ -13,7 +13,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_CEILING
 from pathlib import Path
 from urllib.parse import quote as urlquote
 
@@ -153,7 +153,7 @@ class PaperJournal:
             self.db.executemany('INSERT OR IGNORE INTO seen VALUES (?,?)',
                                 [(key,json.dumps({'status':'BASELINE'})) for key,_ in row_keys(rows)])
 
-    def process(self, key, row, market, book, now):
+    def process(self, key, row, market, book, now, skip_reason=None):
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
             if self.contains(key):
@@ -173,6 +173,8 @@ class PaperJournal:
                             source_timestamp_seconds=row['timestamp'],
                             source_to_decision_seconds=round(now-int(row['timestamp']),3))
             try:
+                if skip_reason:
+                    raise ValueError(skip_reason)
                 reason = market_check(row,market,book,self.config,now)
                 if reason:
                     raise ValueError(reason)
@@ -185,13 +187,33 @@ class PaperJournal:
                 source_price = D(row['price'])
                 if not 0 < source_price < 1:
                     raise ValueError('invalid_source_price')
+                # Record the current executable minimum-size price even when the
+                # account cannot afford that minimum. This never changes funds.
+                decision['source_price'] = str(source_price)
+                try:
+                    diagnostic = quote(book,row['side'],minimum,rate)
+                    decision['minimum_size_price_comparison'] = dict(
+                        shares=str(minimum),snapshot_vwap=str(diagnostic['vwap']),
+                        snapshot_fee_usd=str(diagnostic['fee']),
+                        source_price_slippage_cost_usd=str(
+                            (diagnostic['vwap']-source_price)*minimum*(1 if row['side']=='BUY' else -1)),
+                        executed=False,
+                        interpretation='Hypothetical minimum-size quote, not an account fill or causal latency estimate.')
+                except ValueError:
+                    pass
                 if row['side']=='BUY':
                     exposure = sum((p['cost'] for p in positions.values()),ZERO)
                     budget = min(self.cash,D(self.config['max_buy_usd']),
                                  D(self.config['max_open_cost_usd'])-exposure,
                                  D(self.config['max_outcome_cost_usd'])-position['cost'])
                     limit = (min(Decimal('.9999'),source_price+drift)/tick).to_integral_value(rounding=ROUND_DOWN)*tick
-                    quantity = buy_quantity(book,max(ZERO,budget),rate,limit)
+                    target = min(budget,D(self.config.get('target_buy_usd',self.config['max_buy_usd'])))
+                    quantity = buy_quantity(book,max(ZERO,target),rate,limit)
+                    if quantity < minimum and budget > target:
+                        required = (minimum/STEP).to_integral_value(rounding=ROUND_CEILING)*STEP
+                        minimum_fill = quote(book,'BUY',required,rate,limit)
+                        if minimum_fill['gross']+minimum_fill['fee'] <= budget:
+                            quantity = required
                 else:
                     if not leader_before or source_shares > leader_before:
                         raise ValueError('unmatched_source_sell_baseline_inventory_unknown')
@@ -290,6 +312,8 @@ def main():
     for key in ('starting_cash_usd','max_buy_usd','max_open_cost_usd','max_outcome_cost_usd','max_book_age_seconds'):
         if D(config[key]) <= 0:
             raise ValueError(key+' must be positive')
+    if 'target_buy_usd' in config and not 0 < D(config['target_buy_usd']) <= D(config['max_buy_usd']):
+        raise ValueError('target_buy_usd must be positive and within max_buy_usd')
     journal = PaperJournal(args.db,config)
     stored = journal.db.execute("SELECT value FROM meta WHERE key='observer_start'").fetchone()
     observer_start = int(stored[0]) if stored else int(time.time())
@@ -327,14 +351,17 @@ def main():
                                       source_to_first_seen_seconds=round(observations[key]['delay'],3),
                                       continuous_run_latency_sample=observations[key]['continuous_sample'],
                                       seen_before_run_start=not observations[key]['continuous_sample']))
-                        reason=source_skip(dict(row,side='BUY'),config,time.time())
+                        backlog = int(row['timestamp']) < run_started_wall
+                        reason=('resume_backlog_not_copied' if backlog else
+                                source_skip(dict(row,side='BUY'),config,time.time()))
                         if reason:
                             market=book={}
                         else:
                             market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'],safe=''))
                             book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':row['token_id']})
                             market,book=market_future.result(),book_future.result()
-                        emit(journal.process(key,row,market,book,time.time()))
+                        emit(journal.process(key,row,market,book,time.time(),
+                                             skip_reason='resume_backlog_not_copied' if backlog else None))
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))
                     next_request=max(next_request,time.monotonic()+2)
