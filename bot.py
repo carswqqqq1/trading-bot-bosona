@@ -1,14 +1,16 @@
 """Public Polymarket trade watcher and paper BUY planner. Never submits orders."""
 import argparse
 import hashlib
+import http.client
 import json
 import re
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -50,11 +52,60 @@ def validate(config):
     return config
 
 
+_connections = threading.local()
+
+
+def _https_connection(host):
+    """One keep-alive connection per host per thread. A dead socket is replaced."""
+    conns = getattr(_connections, "conns", None)
+    if conns is None:
+        conns = {}
+        _connections.conns = conns
+    conn = conns.get(host)
+    if conn is None:
+        conn = http.client.HTTPSConnection(host, timeout=10)
+        conns[host] = conn
+    return conn
+
+
+def _drop_connection(host):
+    conns = getattr(_connections, "conns", None) or {}
+    conn = conns.pop(host, None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def get_json(base, params=None):
+    """GET JSON. Repeat calls to the same host reuse the TLS session."""
     url = base + ("?" + urlencode(params) if params else "")
-    request = Request(url, headers={"User-Agent": "btc-copy-paper-prototype/0.1"})
-    with urlopen(request, timeout=10) as response:
-        return json.load(response)
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        request = Request(url, headers={"User-Agent": "btc-copy-paper-prototype/0.1"})
+        with urlopen(request, timeout=10) as response:
+            return json.load(response)
+    path = parts.path or "/"
+    if parts.query:
+        path += "?" + parts.query
+    headers = {"User-Agent": "btc-copy-paper-prototype/0.1", "Accept": "application/json",
+               "Connection": "keep-alive"}
+    last_error = None
+    for _ in range(2):
+        conn = _https_connection(parts.hostname)
+        try:
+            conn.request("GET", path, headers=headers)
+            response = conn.getresponse()
+            payload = response.read()
+            if response.status != 200:
+                _drop_connection(parts.hostname)
+                raise ValueError("http_"+str(response.status))
+            return json.loads(payload)
+        except Exception as exc:
+            _drop_connection(parts.hostname)
+            last_error = exc
+    raise last_error
 
 
 def activity(wallet, start, end, fetch=get_json):

@@ -387,6 +387,13 @@ class PaperCTests(unittest.TestCase):
         self.assertTrue(skipped["rule_skipped"])
         self.assertEqual(journal.cash, Decimal("37.40"))
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+        without_book = journal.process(
+            "buy-rich-nobook", row(price="0.62", size="8", transaction_hash="0xnobook"), None, None, NOW,
+        )
+        self.assertEqual(without_book["status"], "SKIP")
+        self.assertEqual(without_book["reason"], "buy_priced_over_0.60")
+        self.assertEqual(journal.cash, Decimal("37.40"))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
         worse = journal.process(
             "buy-worse", row(price="0.60", size="10", transaction_hash="0xworse"), live,
             book(asks=[{"price": "0.61", "size": "100"}], bids=[{"price": "0.59", "size": "100"}]), NOW,
