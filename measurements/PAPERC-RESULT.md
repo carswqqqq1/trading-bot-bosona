@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), [the following log](paperc-fresh8-2026-10-01.jsonl), [the next log](paperc-fresh9-2026-10-01.jsonl), [the following log](paperc-fresh10-2026-10-01.jsonl), [the next log](paperc-fresh11-2026-10-01.jsonl), [the following log](paperc-fresh12-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), [the following log](paperc-fresh8-2026-10-01.jsonl), [the next log](paperc-fresh9-2026-10-01.jsonl), [the following log](paperc-fresh10-2026-10-01.jsonl), [the next log](paperc-fresh11-2026-10-01.jsonl), [the following log](paperc-fresh12-2026-10-01.jsonl), [the next log](paperc-fresh13-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -584,3 +584,36 @@ The 15-minute market had no published resolution. Its bid quote is a mark, not a
 | Equity reached $78 | yes |
 
 Latency in seconds from his fill to each paper action: 1.482, 1.432, 2.409, 1.437, 1.648, 1.844, 2.04, 2.239, 2.467, 2.424, 3.211, 2.452, 2.646, 2.893, 3.116, 2.422, 1.425. The two resolutions have no fill-to-action latency.
+
+## Continued from $72.90954356
+
+The book was not reset and no rule was changed. The run resumed at cash $72.90954356 with 23.66 Up shares of `btc-updown-15m-1790827200` still open, cost $12.24405. Cumulative realized P/L was $46.15359356. [Log](paperc-fresh13-2026-10-01.jsonl).
+
+Window 1 had no trade. The open book was not quoted at resume, so that cash figure is not a full equity mark.
+
+Window 2 copied one buy, then the resumed market published a resolution. Gamma `umaResolutionStatus` was `resolved`, the market was closed, and `outcomePrices` were `["1", "0"]` for `["Up", "Down"]`, `closedTime` `2026-10-01 04:15:54+00`. The paper close used the published Up price of 1 and the stored cost.
+
+| Action | Shares | Price | Gross | Fee | Cost | Realized | Cash after | Latency (seconds) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Buy Down `btc-updown-15m-1790828100` | 40 | 0.94 | 37.600 | 0.15792 | 37.75792 |  | 35.15162356 | 2.437 |
+| Resolve Up `btc-updown-15m-1790827200` | 23.66 | 1 |  |  | 12.24405 | 11.41595 | 58.81162356 | none |
+
+The resolution left unrealized P/L and equity unset because the new 40-share position was still open. The end of window 2 then marked that position: unrealized P/L -$0.74020, equity $95.82934356. That quote is a mark, not a payout.
+
+The bid then cleared paper cost in the minute the 40-share position opened, so it was sold without waiting for a sell he printed.
+
+| Close | Shares | Sell price | Gross | Fee | Cost | Realized | Cash after | Unrealized | Equity | Equity reached $78 | Latency (seconds) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| Down `btc-updown-15m-1790828100` | 40 | 0.95 | 38.000 | 0.13300 | 37.75792 | 0.10908 | 96.67862356 | 0 | 96.67862356 | yes | 5.233 |
+
+Nothing was left open.
+
+| | USD |
+| --- | ---: |
+| Ending cash | 96.67862356 |
+| Realized P/L | 57.67862356 |
+| Unrealized P/L | 0 |
+| Equity | 96.67862356 |
+| Equity reached $78 | yes |
+
+Latency in seconds from his fill to each paper action: 2.437, 5.233, 1.565, 1.753, 1.965, 2.435. The resolution has no fill-to-action latency.
