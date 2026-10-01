@@ -24,10 +24,13 @@ On a new buy the fee is taken in shares, so the held count is his size minus
 fee divided by price. On a sell the fee comes out of the USDC proceeds. A
 resolution is not a fill and has no fee. Makers pay nothing. A schedule that
 names another rate does not replace 0.07.
-sell_any_minute_if_bid_above_cost is the one changed rule: in any minute, a bid
-above paper cost sells that position without waiting for a sell he prints.
-The opening minute is not special. Decision latency is his fill timestamp to
-that copy or skip. The paper48 path is unchanged.
+sell_any_minute_if_bid_above_cost sells in any minute. A bid above paper cost
+marks the gain. A bid that is no longer above paper cost sells the position
+too, so it does not stay unmarked. Closed profit is not spent on a new buy
+unless five shares fill at his price or better. The opening minute is not
+special. Decision latency is his fill timestamp to that copy or skip.
+seconds_from_start is measured from this restart until marked cash hits the
+goal. A resolution does not count as that goal. The paper48 path is unchanged.
 """
 import argparse
 import base64
@@ -297,9 +300,43 @@ class PaperJournal:
         self.db.execute("INSERT INTO meta VALUES ('goal_run_started_at',?)", (str(started),))
         return started
 
+    def marked_cash_restart_at(self, now=None):
+        """Clock for this restart. Later process restarts keep the same instant."""
+        row = self.db.execute("SELECT value FROM meta WHERE key='marked_cash_restart_at'").fetchone()
+        if row:
+            return float(row[0])
+        started = time.time() if now is None else float(now)
+        self.db.execute("INSERT INTO meta VALUES ('marked_cash_restart_at',?)", (str(started),))
+        return started
+
+    def resolution_windfall(self):
+        row = self.db.execute("SELECT value FROM meta WHERE key='resolution_windfall_usd'").fetchone()
+        return D(row[0]) if row else ZERO
+
+    def note_resolution_windfall(self, realized):
+        """Positive resolution profit is not progress toward the fill goal."""
+        if realized <= 0:
+            return self.resolution_windfall()
+        total = self.resolution_windfall() + realized
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES ('resolution_windfall_usd',?)", (str(total),))
+        return total
+
+    def marked_fill_cash(self):
+        """Cash from the starting balance and repeatable fills, less resolution profit."""
+        return self.cash - self.resolution_windfall()
+
+    def cash_goal_reached(self):
+        """Flat marked cash at the goal. One resolution cannot satisfy it."""
+        if any(position['shares'] > 0 for position in self.holdings().values()):
+            return False
+        goal = self.goal_amount()
+        return self.cash >= goal and self.marked_fill_cash() >= goal
+
     def _stamp_fill_clock(self, decision, now):
         decision['fill_latency_seconds'] = decision.get('decision_latency_seconds')
-        row = self.db.execute("SELECT value FROM meta WHERE key='goal_run_started_at'").fetchone()
+        row = self.db.execute("SELECT value FROM meta WHERE key='marked_cash_restart_at'").fetchone()
+        if row is None:
+            row = self.db.execute("SELECT value FROM meta WHERE key='goal_run_started_at'").fetchone()
         if row:
             decision['seconds_from_start'] = round(float(now) - float(row[0]), 3)
 
@@ -412,33 +449,51 @@ class PaperJournal:
                         position['cost'] = ZERO
                     decision['realized_pnl_usd'] = str(net-removed_cost)
                 elif row['side']=='BUY' and self.config.get('strategy')=='paper_c' and self.config.get('copy_buys_at_or_better'):
-                    # His exact share count. The price is the full-size book VWAP.
-                    # A better VWAP copies. A cap at his tick used to drop that
-                    # size and report the 5-share price instead. Cash that cannot
-                    # cover the full size skips the buy and does not scale it down.
-                    quantity = source_shares
-                    if quantity < max(minimum, FIVE):
+                    # His full size copies only when that size fills at his price
+                    # or better and the debit does not spend closed profit.
+                    # Closed profit may buy five shares, and only when those five
+                    # fill at his price or better. A full size whose price has
+                    # already walked uses that same five-share clip.
+                    if source_shares < max(minimum, FIVE):
                         raise ValueError('below_market_minimum')
                     try:
-                        fill = quote(book,'BUY',quantity,rate)
+                        full = quote(book,'BUY',source_shares,rate)
                     except ValueError:
                         raise ValueError('his_size_not_on_the_book')
-                    decision['simulated_vwap'] = str(fill['vwap'])
-                    if fill['vwap'] > source_price:
-                        raise ValueError('latency_worse_than_leader_price')
-                    # The book must hold his full size. The taker fee is then
-                    # taken in shares, not as extra USDC and not as a rebate.
-                    received = quantity - fill['share_fee']
+                    decision['simulated_vwap'] = str(full['vwap'])
+                    closed_profit = self.cash - D(self.config['starting_cash_usd'])
+                    spends_profit = closed_profit > 0 and full['gross'] > D(self.config['starting_cash_usd'])
+                    walked = full['vwap'] > source_price
+                    if not walked and not spends_profit:
+                        if full['gross'] > self.cash:
+                            raise ValueError('his_size_exceeds_cash')
+                        chosen, quantity = full, source_shares
+                        decision['copy_size'] = 'exact'
+                    else:
+                        if FIVE < minimum:
+                            raise ValueError('below_market_minimum')
+                        try:
+                            clip = quote(book,'BUY',FIVE,rate)
+                        except ValueError:
+                            if walked:
+                                raise ValueError('latency_worse_than_leader_price')
+                            raise ValueError('his_size_exceeds_cash' if spends_profit else 'his_size_not_on_the_book')
+                        decision['simulated_vwap'] = str(clip['vwap'])
+                        if clip['vwap'] > source_price:
+                            raise ValueError('latency_worse_than_leader_price')
+                        if clip['gross'] > self.cash:
+                            raise ValueError('his_size_exceeds_cash')
+                        chosen, quantity = clip, FIVE
+                        decision['copy_size'] = 'five'
+                    received = quantity - chosen['share_fee']
                     if received <= 0:
                         raise ValueError('taker_fee_consumed_the_shares')
-                    debit = fill['gross']
-                    if debit > self.cash:
-                        raise ValueError('his_size_exceeds_cash')
+                    debit = chosen['gross']
                     cash = self.cash-debit
                     opening = position['shares'] == 0
                     position['shares'] += received
                     position['cost'] += debit
-                    fill = dict(fill, shares=received)
+                    fill = dict(chosen, shares=received)
                     decision['fee_collected_in'] = 'shares'
                     decision['share_fee'] = str(fill['share_fee'])
                     if opening:
@@ -572,10 +627,12 @@ class PaperJournal:
             return None
 
     def realize_any_minute_if_bid_above_cost(self, market, book, now):
-        """Sell a paper position when the bid clears cost in any minute.
+        """Sell a paper position in any minute.
 
-        This does not wait for a sell he prints. The opening minute is not
-        special. The book must hold the full position. Missing size is not invented.
+        A bid above paper cost marks the gain. A bid that is no longer above
+        paper cost sells the position as well, so closed profit is not left
+        in an unmarked book. This does not wait for a sell he prints. The
+        book must hold the full position. Missing size is not invented.
         """
         if not (self.config.get('strategy')=='paper_c' and self.config.get('sell_any_minute_if_bid_above_cost')):
             return None
@@ -597,14 +654,30 @@ class PaperJournal:
                 if minimum <= 0 or quantity <= 0:
                     return None
                 cost_per = position['cost']/quantity
+                removed = position['cost']
+                reason = None
                 try:
                     fill = quote(book,'SELL',quantity,rate,cost_per)
                 except ValueError:
-                    return None
-                removed = position['cost']
-                net = fill['gross']-fill['fee']
-                if fill['vwap'] <= cost_per or net <= removed:
-                    return None
+                    fill = None
+                if fill is not None and fill['vwap'] > cost_per:
+                    net = fill['gross']-fill['fee']
+                    if net <= removed:
+                        return None
+                    reason = 'any_minute_bid_above_paper_cost'
+                    latency_note = ('The bid was above paper cost. This sell does not wait for the '
+                                    'opening minute or for a sell he prints. Latency is his opening fill to this sell.')
+                else:
+                    try:
+                        fill = quote(book,'SELL',quantity,rate)
+                    except ValueError:
+                        return None
+                    if fill['vwap'] > cost_per:
+                        return None
+                    net = fill['gross']-fill['fee']
+                    reason = 'any_minute_bid_no_longer_above_paper_cost'
+                    latency_note = ('The bid is no longer above paper cost, so the open position is sold '
+                                    'in this minute instead of staying unmarked. Latency is his opening fill to this sell.')
                 cash = self.cash+net
                 position['shares'] = ZERO
                 position['cost'] = ZERO
@@ -612,7 +685,7 @@ class PaperJournal:
                 source_ts = position.get('opened_source_timestamp', position['row'].get('timestamp'))
                 latency = None if source_ts is None else round(now-int(source_ts), 3)
                 opened = position.get('opened_at')
-                decision = dict(status='PAPER_SELL',reason='any_minute_bid_above_paper_cost',rule_skipped=False,
+                decision = dict(status='PAPER_SELL',reason=reason,rule_skipped=False,
                                 paper=True,executed=False,side='SELL',slug=position['row'].get('slug'),
                                 outcome=position['row'].get('outcome'),token_id=token,
                                 shares=str(quantity),gross=str(fill['gross']),fee=str(fill['fee']),
@@ -620,8 +693,7 @@ class PaperJournal:
                                 realized_pnl_usd=str(net-removed),cash_usd=str(cash),held_shares='0',
                                 cost_per_share_usd=str(cost_per),cost_usd=str(removed),
                                 source_timestamp_seconds=source_ts,decision_latency_seconds=latency,
-                                latency_note=('The bid was above paper cost. This sell does not wait for the '
-                                              'opening minute or for a sell he prints. Latency is his opening fill to this sell.'))
+                                latency_note=latency_note)
                 self._stamp_fill_clock(decision, now)
                 self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
                                 (token,json.dumps(position,default=str)))
@@ -630,7 +702,8 @@ class PaperJournal:
                     decision['unrealized_pnl_usd'] = '0'
                     decision['equity_usd'] = str(cash)
                     decision['goal_usd'] = str(self.goal_amount())
-                    decision['equity_reached_goal'] = cash >= self.goal_amount()
+                    decision['marked_fill_cash_usd'] = str(self.marked_fill_cash())
+                    decision['equity_reached_goal'] = self.cash_goal_reached()
                 seen = f"any-minute:{token}:{opened if opened is not None else 'open'}"
                 self.db.execute('INSERT INTO seen VALUES (?,?)', (seen, json.dumps(decision)))
                 return decision
@@ -724,6 +797,7 @@ class PaperJournal:
                 position['shares'] = ZERO
                 position['cost'] = ZERO
                 self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
+                self.note_resolution_windfall(realized)
                 self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
                                 (token,json.dumps(position,default=str)))
                 held_after = sum((p['shares'] for p in self.holdings().values()),ZERO)
@@ -742,7 +816,9 @@ class PaperJournal:
                     decision['unrealized_pnl_usd'] = '0'
                     decision['equity_usd'] = str(cash)
                     decision['goal_usd'] = str(self.goal_amount())
-                    decision['equity_reached_goal'] = cash >= self.goal_amount()
+                    decision['marked_fill_cash_usd'] = str(self.marked_fill_cash())
+                    # A resolution can raise cash. It is not the fill goal.
+                    decision['equity_reached_goal'] = False
                 self.db.execute('INSERT INTO seen VALUES (?,?)',(key,json.dumps(decision)))
                 results.append(decision)
         return results
@@ -993,7 +1069,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
     REST feed is only the backup.
     """
     run_started_wall = time.time()
-    goal_started = journal.goal_run_started_at(run_started_wall)
+    journal.goal_run_started_at(run_started_wall)
+    goal_started = journal.marked_cash_restart_at(run_started_wall)
     journal.db.commit()
     observations, session_decisions, windows, equity_samples = {}, [], [], []
     rule_reset = None
@@ -1055,13 +1132,14 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     emit(dict(status='ERROR',message=str(exc)))
 
         rule_name = 'sell_any_minute_if_bid_above_cost' if config.get('sell_any_minute_if_bid_above_cost') else None
-        buy_filter = ('copy his exact share count, same side and market, only when the full size fills at his price or better; '
-                      'skip when that size is not on the book or costs more than cash; '
-                      'do not copy at a worse price; '
+        buy_filter = ('copy his exact share count, same side and market, only when the full size fills at his price or better and the debit does not spend closed profit; '
+                      'closed profit may buy five shares only when those five fill at his price or better; '
+                      'a full size whose ask has walked uses that same five-share clip when it is still at his price; '
+                      'skip when that size is not on the book; do not copy at a worse price; '
                       'a new buy pays the taker fee in shares and a new sell pays it from USDC proceeds; '
                       'copy a sell he prints only when it closes an existing paper position above paper cost')
         if rule_name:
-            buy_filter += '; in any minute, sell when the bid is above paper cost without waiting for his sell'
+            buy_filter += '; in any minute, sell when the bid is above paper cost, and sell when the bid is no longer above paper cost'
         emit(dict(status='STARTED',strategy='paper_c',paper=True,executed=False,live_orders=False,
                   leader_wallet=config['leader_wallet'],starting_cash_usd=str(config['starting_cash_usd']),
                   resumed_cash_usd=str(journal.cash),goal_usd=str(journal.goal_amount()),
@@ -1098,15 +1176,16 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         goal_hit = {'done': False}
 
         def mark_goal(decision):
-            if decision.get('equity_reached_goal') is True or (
-                    not position_open() and journal.cash >= journal.goal_amount()
-                    and decision.get('status') in ('PAPER_SELL', 'PAPER_RESOLUTION')):
+            if decision.get('status') == 'PAPER_RESOLUTION':
+                return
+            if journal.cash_goal_reached():
                 goal_hit['done'] = True
                 emit(dict(status='GOAL', paper=True, executed=False, live_orders=False,
                           goal_usd=str(journal.goal_amount()), cash_usd=str(journal.cash),
-                          equity_usd=str(journal.cash if not position_open() else decision.get('equity_usd')),
+                          marked_fill_cash_usd=str(journal.marked_fill_cash()),
+                          equity_usd=str(journal.cash),
                           seconds_from_start=round(time.time()-goal_started, 3),
-                          goal_run_started_at=goal_started))
+                          marked_cash_restart_at=goal_started))
 
         try:
             window_index = 1
@@ -1183,7 +1262,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                     needs_book = sell_can_close or (row['side']=='BUY' and config.get('copy_buys_at_or_better'))
                                     if needs_book:
                                         market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'],safe=''))
-                                        book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':row['token_id']})
+                                        book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':row['token_id']}, True)
                                         market,book=market_future.result(),book_future.result()
                                         acted=time.time()
                                         decision=journal.process(key,row,market,book,acted)
@@ -1226,13 +1305,14 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                 equity = None if port.get('unresolved_positions') else D(port.get('equity_at_liquidation_quote_usd',port['cash_usd']))
                 if equity is not None:
                     equity_samples.append(equity)
-                    if equity >= journal.goal_amount() and not goal_hit['done']:
+                    if journal.cash_goal_reached() and not goal_hit['done']:
                         goal_hit['done'] = True
                         emit(dict(status='GOAL',paper=True,executed=False,live_orders=False,
                                   goal_usd=str(journal.goal_amount()),cash_usd=str(journal.cash),
-                                  equity_usd=str(equity),
+                                  marked_fill_cash_usd=str(journal.marked_fill_cash()),
+                                  equity_usd=str(journal.cash),
                                   seconds_from_start=round(time.time()-goal_started,3),
-                                  goal_run_started_at=goal_started))
+                                  marked_cash_restart_at=goal_started))
                 window_record = dict(status='WINDOW',window=window_index,trades=len(window_decisions),
                                      note=None if window_decisions else 'No trade in this window.',
                                      decisions=window_decisions,cash_usd=port['cash_usd'],
@@ -1254,12 +1334,25 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                    if isinstance(d.get('decision_latency_seconds'),(int,float)) and d['decision_latency_seconds']>=0]
         copies = sum(d.get('status') in ('PAPER_BUY','PAPER_SELL') for d in session_decisions)
         skips = sum(d.get('status')=='SKIP' for d in session_decisions)
+        buy_latencies=sorted(d['fill_latency_seconds'] for d in session_decisions
+                             if d.get('status')=='PAPER_BUY' and isinstance(d.get('fill_latency_seconds'),(int,float)))
+        if not buy_latencies:
+            median_buy_latency=None
+        elif len(buy_latencies)%2==1:
+            median_buy_latency=buy_latencies[len(buy_latencies)//2]
+        else:
+            mid=len(buy_latencies)//2
+            median_buy_latency=(buy_latencies[mid-1]+buy_latencies[mid])/2
         summary=dict(status='SUMMARY',duration_seconds=round(time.monotonic()-started,2),
                      windows=len(windows),decisions=len(session_decisions),
                      copies=copies,skips=skips,
+                     buy_count=len(buy_latencies),
                      sells_copied=sum(d.get('status')=='PAPER_SELL' for d in session_decisions),
                      fees_usd=final.get('total_simulated_fees_usd'),
                      cash_usd=final.get('cash_usd'),realized_pnl_usd=final.get('realized_pnl_usd'),
+                     open_cost_usd=final.get('open_cost_usd'),
+                     marked_fill_cash_usd=str(journal.marked_fill_cash()),
+                     median_buy_latency_seconds=median_buy_latency,
                      decision_latency_min_seconds=min(latencies) if latencies else None,
                      decision_latency_max_seconds=max(latencies) if latencies else None,
                      reset_to_starting_cash=rule_reset is not None,
@@ -1268,12 +1361,12 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                      seconds_from_start=round(time.time()-goal_started,3),
                      goal_usd=str(journal.goal_amount()),
                      goal_reached=goal_hit['done'],
-                     note='Paper fills only. No live orders. Latency is his fill timestamp to the copy or skip. seconds_from_start is measured from the first run of this book toward the goal.')
+                     note='Paper fills only. No live orders. Latency is his fill timestamp to the copy or skip. seconds_from_start is measured from this restart until marked cash from fills hits the goal. A resolution does not count.')
         emit(summary)
     if args.result:
         ending_equity = final.get('equity_at_liquidation_quote_usd')
         goal = journal.goal_amount()
-        goal_reached = ending_equity is not None and D(ending_equity) >= goal
+        goal_reached = journal.cash_goal_reached()
         result=dict(name='Paper C',paper_only=True,live_orders=False,private_keys_used=False,brez_used=False,
                     leader_wallet=config['leader_wallet'],leader_handle='@bosona',
                     starting_cash_usd=str(D(config['starting_cash_usd'])),

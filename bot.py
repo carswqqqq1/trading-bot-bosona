@@ -96,9 +96,9 @@ class PublicClient:
         self._cache = {}
         self._inflight = {}
 
-    def get_json(self, base, params=None):
+    def get_json(self, base, params=None, fresh=False):
         url = base + ("?" + urlencode(params) if params else "")
-        cached = self._read_cache(url)
+        cached = None if fresh else self._read_cache(url)
         if cached is not None:
             return cached
         host = urlsplit(url).hostname
@@ -122,7 +122,7 @@ class PublicClient:
                 raise flight.error
             return flight.value
         try:
-            cached = self._read_cache(url)
+            cached = None if fresh else self._read_cache(url)
             if cached is not None:
                 flight.value = cached
                 return cached
@@ -276,8 +276,8 @@ def _retry_after_seconds(value):
 client = PublicClient()
 
 
-def get_json(base, params=None):
-    return client.get_json(base, params)
+def get_json(base, params=None, fresh=False):
+    return client.get_json(base, params, fresh)
 
 
 def activity(wallet, start, end, fetch=get_json):
