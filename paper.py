@@ -27,10 +27,17 @@ without waiting for a sell he prints. Decision latency is his fill timestamp to
 that copy or skip. The paper48 path is unchanged.
 """
 import argparse
+import base64
 import json
 import math
+import os
+import queue
 import re
+import socket
 import sqlite3
+import ssl
+import struct
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -72,13 +79,11 @@ def taker_fee_usdc(shares, rate, price):
 def taker_fee_rate(market, slug=None):
     """Taker rate for a new paper fill. Makers pay nothing and there is no rebate.
 
-    Bitcoin up-or-down markets are crypto, so the rate is 0.07 unless the
-    market's own fee fields name a different taker rate. Fees off, or a
-    geopolitics market, charge 0.
+    Bitcoin up-or-down fills use the crypto taker rate 0.07:
+    shares × 0.07 × price × (1 − price). A geopolitics market charges 0.
+    Any other market uses its own schedule, or 0 when fees are off.
     """
     market = market if isinstance(market, dict) else {}
-    if market.get('feesEnabled') is False:
-        return ZERO
     labels = [str(market.get(key) or '') for key in ('category', 'feeType', 'slug')]
     tags = market.get('tags') or []
     if isinstance(tags, list):
@@ -87,15 +92,17 @@ def taker_fee_rate(market, slug=None):
         labels.append(str(slug))
     if 'geopolitic' in ' '.join(labels).lower():
         return ZERO
+    name = str(slug or market.get('slug') or '')
+    if name.startswith('btc-updown-') or name.startswith('bitcoin-up-or-down-'):
+        return Decimal('0.07')
+    if market.get('feesEnabled') is False:
+        return ZERO
     schedule = market.get('feeSchedule') or {}
     if schedule.get('rate') is not None:
         rate = D(schedule['rate'])
         if not 0 <= rate <= 1:
             raise ValueError('invalid_fee_rate')
         return rate
-    name = str(slug or market.get('slug') or '')
-    if name.startswith('btc-updown-') or name.startswith('bitcoin-up-or-down-'):
-        return Decimal('0.07')
     return fee_rate(market)
 
 
@@ -140,6 +147,26 @@ def paper_goal(config):
     if raw is None or raw == '':
         return D('78')
     return D(raw)
+
+
+def trade_ident(row):
+    """Stable id for one fill, shared by the websocket and the activity poll."""
+    if not isinstance(row, dict):
+        return None
+    tx = row.get('transaction_hash') or row.get('source_transaction')
+    side = row.get('side')
+    ts = row.get('timestamp', row.get('source_timestamp_seconds'))
+    size = row.get('size', row.get('source_size'))
+    if not tx or side not in ('BUY', 'SELL') or ts is None or size is None:
+        return None
+    try:
+        ts = int(D(ts))
+        if ts > 10_000_000_000:
+            ts //= 1000
+        size = format(D(size).quantize(Decimal('0.000001')), 'f')
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+    return f'{tx}|{side}|{ts}|{size}'
 
 
 def public_resolution_price(market, outcome, token):
@@ -276,6 +303,9 @@ class PaperJournal:
 
     def __init__(self, path, config):
         self.config = config
+        # Runtime only. Writing this into the stored config would reject the book
+        # on the next start, because the file config would no longer match.
+        self.sell_above_cost_while_losing = False
         self.db = sqlite3.connect(path)
         self.db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY,payload TEXT)')
@@ -298,6 +328,25 @@ class PaperJournal:
 
     def contains(self, key):
         return self.db.execute('SELECT 1 FROM seen WHERE id=?', (key,)).fetchone() is not None
+
+    def claim(self, ident):
+        """True the first time this fill is accepted. Later sources are duplicates."""
+        if not ident:
+            return True
+        self.db.execute('CREATE TABLE IF NOT EXISTS claims (ident TEXT PRIMARY KEY)')
+        with self.db:
+            cur = self.db.execute('INSERT OR IGNORE INTO claims VALUES (?)', (ident,))
+            return cur.rowcount == 1
+
+    def unclaim(self, ident):
+        if not ident:
+            return
+        with self.db:
+            self.db.execute('DELETE FROM claims WHERE ident=?', (ident,))
+
+    def note_seen(self, key):
+        with self.db:
+            self.db.execute('INSERT OR IGNORE INTO seen VALUES (?,?)', (key, '{"status":"DUPLICATE"}'))
 
     def baseline(self, rows, observer_start):
         if self.db.execute("SELECT 1 FROM meta WHERE key='observer_start'").fetchone():
@@ -400,6 +449,7 @@ class PaperJournal:
                     if position['shares']==0:
                         position['cost'] = ZERO
                     decision['realized_pnl_usd'] = str(net-removed_cost)
+                    decision['fee_collected_in'] = 'usdc'
                 elif row['side']=='BUY' and self.config.get('strategy')=='paper_c' and self.config.get('copy_buys_at_or_better'):
                     # His exact share count. The price is the full-size book VWAP.
                     # A better VWAP copies. A cap at his tick used to drop that
@@ -561,8 +611,8 @@ class PaperJournal:
     def realize_same_minute_if_bid_above_cost(self, market, book, now):
         """Sell a paper position when the bid clears cost in its opening minute.
 
-        This does not wait for a sell he prints. A later minute does not sell.
-        The book must hold the full position. Missing size is not invented.
+        This does not wait for a sell he prints. A later minute sells only while
+        the book is under its starting cash. The book must hold the full position.
         """
         if not (self.config.get('strategy')=='paper_c' and self.config.get('sell_same_minute_if_bid_above_cost')):
             return None
@@ -574,7 +624,10 @@ class PaperJournal:
                 if not position or position['shares'] <= 0 or position['cost'] <= 0:
                     return None
                 opened = position.get('opened_at')
-                if opened is None or int(D(opened)) // 60 != int(now) // 60:
+                same_minute = opened is not None and int(D(opened)) // 60 == int(now) // 60
+                # While equity is under the start, a later bid above paper cost
+                # is sold too. That locks a gain instead of riding a loser out.
+                if opened is None or not (same_minute or self.sell_above_cost_while_losing):
                     return None
                 if book.get('market') != position['row'].get('condition_id'):
                     return None
@@ -601,15 +654,18 @@ class PaperJournal:
                 self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
                 source_ts = position.get('opened_source_timestamp', position['row'].get('timestamp'))
                 latency = None if source_ts is None else round(now-int(source_ts), 3)
-                decision = dict(status='PAPER_SELL',reason='same_minute_bid_above_paper_cost',rule_skipped=False,
+                reason = ('same_minute_bid_above_paper_cost' if same_minute
+                          else 'losing_book_bid_above_paper_cost')
+                decision = dict(status='PAPER_SELL',reason=reason,rule_skipped=False,
                                 paper=True,executed=False,side='SELL',slug=position['row'].get('slug'),
                                 outcome=position['row'].get('outcome'),token_id=token,
                                 shares=str(quantity),gross=str(fill['gross']),fee=str(fill['fee']),
+                                fee_collected_in='usdc',fee_rate=str(rate),
                                 vwap=str(fill['vwap']),our_price=str(fill['vwap']),his_price=None,cent_gap=None,
                                 realized_pnl_usd=str(net-removed),cash_usd=str(cash),held_shares='0',
                                 cost_per_share_usd=str(cost_per),cost_usd=str(removed),
                                 source_timestamp_seconds=source_ts,decision_latency_seconds=latency,
-                                latency_note=('The bid was above paper cost in the same minute the position opened. '
+                                latency_note=('The bid was above paper cost. '
                                               'This sell is not one of his prints. Latency is his opening fill to this sell.'))
                 self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
                                 (token,json.dumps(position,default=str)))
@@ -778,6 +834,175 @@ def decision_view(decision, window):
                 price_note=decision.get('price_note'))
 
 
+class LeaderTradeFeed:
+    """Public activity websocket. His fills are queued; nothing is signed or sent."""
+
+    def __init__(self, wallet):
+        self.wallet = wallet.lower()
+        self.queue = queue.Queue()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name='leader-trades', daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def drain(self):
+        rows = []
+        while True:
+            try:
+                rows.append(self.queue.get_nowait())
+            except queue.Empty:
+                return rows
+
+    def _run(self):
+        delay = 1
+        while not self._stop.is_set():
+            try:
+                self._listen()
+                delay = 1
+            except Exception:
+                time.sleep(delay)
+                delay = min(delay * 2, 15)
+
+    def _listen(self):
+        host = 'ws-live-data.polymarket.com'
+        key = base64.b64encode(os.urandom(16)).decode()
+        ctx = ssl.create_default_context()
+        raw = socket.create_connection((host, 443), timeout=10)
+        conn = ctx.wrap_socket(raw, server_hostname=host)
+        try:
+            conn.sendall(
+                f'GET / HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n'.encode())
+            buf = b''
+            while b'\r\n\r\n' not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+            extra = buf.split(b'\r\n\r\n', 1)[1]
+            sub = json.dumps({'action': 'subscribe', 'subscriptions': [
+                {'topic': 'activity', 'type': 'trades'}]}).encode()
+            self._send(conn, 0x1, sub)
+            conn.settimeout(5)
+            pending = b''
+            buf = bytearray(extra)
+            while not self._stop.is_set():
+                try:
+                    chunk = conn.recv(65536)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    return
+                buf += chunk
+                while True:
+                    frame = self._pop_frame(buf)
+                    if frame is None:
+                        break
+                    op, data = frame
+                    if op == 0x8:
+                        return
+                    if op == 0x9:
+                        self._send(conn, 0xA, data)
+                        continue
+                    if op == 0x1 and data:
+                        pending = self._take_text(pending + data)
+                    elif op == 0x0 and data:
+                        pending = self._take_text(pending + data)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _take_text(self, pending):
+        try:
+            text = pending.decode()
+        except UnicodeDecodeError:
+            return pending
+        decoder = json.JSONDecoder(parse_float=str, parse_int=str)
+        while text:
+            try:
+                msg, end = decoder.raw_decode(text)
+            except json.JSONDecodeError:
+                return text.encode()
+            text = text[end:].lstrip()
+            if isinstance(msg, dict) and msg.get('topic') == 'activity' and msg.get('type') == 'trades':
+                row = self._row(msg.get('payload') or {})
+                if row is not None:
+                    self.queue.put(row)
+        return b''
+
+    def _row(self, payload):
+        wallet = str(payload.get('proxyWallet') or '').lower()
+        slug = payload.get('slug')
+        if wallet != self.wallet or market_timeframe(slug) is None:
+            return None
+        if payload.get('side') not in ('BUY', 'SELL'):
+            return None
+        try:
+            ts = int(D(payload.get('timestamp')))
+            if ts > 10_000_000_000:
+                ts //= 1000
+        except (ValueError, TypeError, ArithmeticError):
+            return None
+        if payload.get('size') is None or payload.get('price') is None:
+            return None
+        return dict(proxy_wallet=wallet, transaction_hash=payload.get('transactionHash'),
+                    condition_id=payload.get('conditionId'), token_id=str(payload.get('asset') or ''),
+                    timestamp=ts, side=payload.get('side'),
+                    size=payload.get('size'), price=payload.get('price'), type='TRADE',
+                    slug=slug, outcome=payload.get('outcome'), is_combo=False)
+
+    @staticmethod
+    def _send(conn, opcode, data):
+        mask = os.urandom(4)
+        n = len(data)
+        header = bytearray([0x80 | opcode])
+        if n < 126:
+            header.append(0x80 | n)
+        elif n < 65536:
+            header.append(0x80 | 126)
+            header += struct.pack('!H', n)
+        else:
+            header.append(0x80 | 127)
+            header += struct.pack('!Q', n)
+        conn.sendall(bytes(header) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+    @staticmethod
+    def _pop_frame(buf):
+        if len(buf) < 2:
+            return None
+        opcode = buf[0] & 0x0F
+        masked = buf[1] & 0x80
+        n = buf[1] & 0x7F
+        i = 2
+        if n == 126:
+            if len(buf) < 4:
+                return None
+            n = struct.unpack('!H', buf[2:4])[0]
+            i = 4
+        elif n == 127:
+            if len(buf) < 10:
+                return None
+            n = struct.unpack('!Q', buf[2:10])[0]
+            i = 10
+        extra = 4 if masked else 0
+        if len(buf) < i + extra + n:
+            return None
+        if masked:
+            mask = buf[i:i + 4]
+            i += 4
+            data = bytes(buf[i + j] ^ mask[j % 4] for j in range(n))
+        else:
+            data = bytes(buf[i:i + n])
+        del buf[:i + n]
+        return opcode, data
+
+
 def run_paper_c(args, config, journal, observer_start, source_start):
     """Several short live windows. Decide each new trade before the next poll wait."""
     run_started_wall = time.time()
@@ -794,6 +1019,14 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                 return
             session_decisions.append(decision)
             window_decisions.append(decision_view(decision, window_index))
+            if decision.get('status') in ('PAPER_BUY','PAPER_SELL'):
+                emit(dict(status='FILL_LATENCY',paper=True,executed=False,
+                          action=decision.get('status'),side=decision.get('side'),slug=decision.get('slug'),
+                          outcome=decision.get('outcome'),
+                          decision_latency_seconds=decision.get('decision_latency_seconds'),
+                          fee_usd=decision.get('fee'),fee_collected_in=decision.get('fee_collected_in'),
+                          fee_rate=decision.get('fee_rate'),
+                          seconds_from_start=round(time.time()-observer_start,3)))
 
         def note_same_minute_sell(exited, window_index):
             if not exited:
@@ -817,6 +1050,33 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                 if position['shares'] > 0 and opened is not None and int(D(opened)) // 60 == minute:
                     return True
             return False
+
+        loss_checked = 0
+
+        def sell_while_losing(window_index):
+            """After the opening minute, sell above paper cost only while equity is down."""
+            nonlocal loss_checked
+            if not journal.sell_above_cost_while_losing:
+                return
+            if time.monotonic()-loss_checked < 1:
+                return
+            loss_checked = time.monotonic()
+            for token, position in list(journal.holdings().items()):
+                if position['shares'] <= 0:
+                    continue
+                opened = position.get('opened_at')
+                if opened is not None and int(D(opened)) // 60 == int(time.time()) // 60:
+                    continue
+                try:
+                    market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
+                    book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
+                    note_same_minute_sell(
+                        journal.realize_same_minute_if_bid_above_cost(market_future.result(), book_future.result(), time.time()),
+                        window_index)
+                except RateLimited:
+                    raise
+                except Exception as exc:
+                    emit(dict(status='ERROR',message=str(exc),token_id=token))
 
         def sell_same_minute(window_index, market=None, book=None):
             if not config.get('sell_same_minute_if_bid_above_cost'):
@@ -854,7 +1114,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                       'a new buy pays the taker fee in shares and a new sell pays it from USDC proceeds; '
                       'copy a sell he prints only when it closes an existing paper position above paper cost')
         if config.get('sell_same_minute_if_bid_above_cost'):
-            buy_filter += '; in the opening minute, sell when the bid is above paper cost without waiting for his sell'
+            buy_filter += ('; in the opening minute, sell when the bid is above paper cost without waiting for his sell'
+                           '; while quoted equity is under the starting cash, that same bid sells after the opening minute too')
         emit(dict(status='STARTED',strategy='paper_c',paper=True,executed=False,live_orders=False,
                   leader_wallet=config['leader_wallet'],starting_cash_usd=str(config['starting_cash_usd']),
                   resumed_cash_usd=str(journal.cash),
@@ -880,9 +1141,28 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                   realized_pnl_usd=opening.get('realized_pnl_usd'),
                   goal_usd=str(paper_goal(config)),
                   equity_reached_78=opening_equity>=D('78'),
-                  goal_reached=opening_equity>=paper_goal(config)))
+                  goal_reached=opening_equity>=paper_goal(config),
+                  seconds_from_start=round(time.time()-observer_start,3)))
+        quoted_open = opening.get('equity_at_liquidation_quote_usd')
+        journal.sell_above_cost_while_losing = (
+            quoted_open is not None and D(quoted_open) < D(config['starting_cash_usd']))
+        if journal.sell_above_cost_while_losing:
+            emit(dict(status='LOSS_ADJUSTMENT',paper=True,executed=False,
+                      cash_usd=str(journal.cash),equity_usd=str(opening_equity),
+                      rule='sell_above_cost_while_losing',
+                      note='Equity is under the starting cash, so a bid above paper cost sells even after the opening minute.'))
+        for (payload,) in journal.db.execute('SELECT payload FROM seen'):
+            try:
+                journal.claim(trade_ident(json.loads(payload)))
+            except Exception:
+                pass
+        feed = LeaderTradeFeed(config['leader_wallet'])
+        feed.start()
         try:
-            for window_index in range(1, args.windows+1):
+            window_index = 1
+            while True:
+                if not args.until_goal and window_index > args.windows:
+                    break
                 window_started = time.monotonic()
                 window_decisions = []
                 emit(dict(status='WINDOW_START',window=window_index,cash_usd=str(journal.cash),
@@ -896,6 +1176,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     try:
                         if minute_position_open():
                             sell_same_minute(window_index)
+                        sell_while_losing(window_index)
                     except RateLimited as exc:
                         rate_hold = exc.retry_after
                         emit(dict(status='ERROR',message=str(exc),retry_after_seconds=exc.retry_after))
@@ -911,6 +1192,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                             watched=time.monotonic()
                             try:
                                 sell_same_minute(window_index)
+                                sell_while_losing(window_index)
                             except RateLimited as exc:
                                 rate_hold = exc.retry_after
                                 emit(dict(status='ERROR',message=str(exc),retry_after_seconds=exc.retry_after))
@@ -929,13 +1211,21 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                 time.sleep(min(rate_hold, remaining))
                             continue
                         rows=activity_future.result()
-                        for key,row in row_keys(rows):
-                            if journal.contains(key):
+                        incoming=[]
+                        for live in feed.drain():
+                            incoming.append((trade_ident(live) or json.dumps(live,default=str), live))
+                        incoming.extend(row_keys(rows))
+                        for key,row in incoming:
+                            if not key or journal.contains(key):
                                 continue
                             if (row.get('proxy_wallet','').lower()!=config['leader_wallet'].lower()
                                 or row.get('type')!='TRADE' or row.get('is_combo') or row.get('side') not in ('BUY','SELL')
                                 or market_timeframe(row.get('slug')) not in config['timeframes_minutes']
                                 or int(row['timestamp']) < observer_start):
+                                continue
+                            ident = trade_ident(row)
+                            if ident and not journal.claim(ident):
+                                journal.note_seen(key)
                                 continue
                             appeared = time.time()
                             if key not in observations:
@@ -980,12 +1270,16 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                         emit(decision)
                                         remember(window_index, decision)
                             except RateLimited as exc:
+                                if ident:
+                                    journal.unclaim(ident)
                                 rate_hold = exc.retry_after
                                 emit(dict(status='ERROR',message=str(exc),event_id=key,
                                           retry_after_seconds=exc.retry_after))
                                 next_request=max(next_request,time.monotonic()+exc.retry_after)
                                 break
                             except Exception as exc:
+                                if ident:
+                                    journal.unclaim(ident)
                                 emit(dict(status='ERROR',message=str(exc),event_id=key))
                     except RateLimited as exc:
                         rate_hold = exc.retry_after
@@ -1026,8 +1320,23 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                      open_cost_usd=port['open_cost_usd'],paper=True,executed=False)
                 windows.append(window_record)
                 emit(window_record)
+                if equity is not None:
+                    losing = equity < D(config['starting_cash_usd'])
+                    if losing and not journal.sell_above_cost_while_losing:
+                        emit(dict(status='LOSS_ADJUSTMENT',paper=True,executed=False,
+                                  cash_usd=str(journal.cash),equity_usd=str(equity),
+                                  rule='sell_above_cost_while_losing',
+                                  note='Equity is under the starting cash, so a bid above paper cost sells even after the opening minute.'))
+                    journal.sell_above_cost_while_losing = losing
+                if args.until_goal and equity is not None and equity >= paper_goal(config):
+                    emit(dict(status='GOAL',paper=True,executed=False,goal_usd=str(paper_goal(config)),
+                              equity_usd=str(equity),
+                              seconds_from_start_to_goal=round(time.time()-observer_start,3)))
+                    break
+                window_index += 1
         except KeyboardInterrupt:
             pass
+        feed.stop()
         final = journal.portfolio()
         emit(final)
         latencies=[d['decision_latency_seconds'] for d in session_decisions
@@ -1084,16 +1393,20 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                  latency_note=d.get('latency_note'),price_source=d.get('price_source'),
                                  reason=d.get('reason'),our_price=d.get('our_price'))
                             for d in session_decisions
-                            if d.get('status')=='PAPER_RESOLUTION' or d.get('reason')=='same_minute_bid_above_paper_cost'],
+                            if d.get('status')=='PAPER_RESOLUTION' or d.get('reason') in (
+                                'same_minute_bid_above_paper_cost', 'losing_book_bid_above_paper_cost')],
                     book_was_steadily_losing=rule_reset is not None,
-                    goal_usd=str(goal),goal_reached=goal_reached,poll_seconds=config['poll_seconds'],
+                    goal_usd=str(goal),goal_reached=goal_reached,
+                    seconds_from_start_to_goal=(round(time.time()-observer_start,3) if goal_reached else None),
+                    poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
                     filter=('Copy his exact share count, same side and market, only when the full size fills at his price or better. '
                             'Skip that buy when the size is not on the book or costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. '
-                            'A new fill is a taker. The fee is shares times feeRate times price times one minus price, rounded to five decimals. '
+                            'A new fill is a taker. The crypto fee is shares times 0.07 times price times one minus price, rounded to five decimals. '
                             'On a buy that fee is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee. '
                             'Copy a sell he prints only when it closes an existing paper position above paper cost. '
-                            'In the same minute a position opens, sell it when the bid is above paper cost without waiting for a sell he prints.'
+                            'In the same minute a position opens, sell it when the bid is above paper cost without waiting for a sell he prints. '
+                            'While quoted equity is under the starting cash, that same bid sells after the opening minute too.'
                             if config.get('sell_same_minute_if_bid_above_cost') else
                             'Copy his exact share count, same side and market, only when the book fills at his price or better. '
                             'Skip that buy when the size costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. '
@@ -1116,6 +1429,7 @@ def main():
     parser.add_argument('--output',default='paper48.jsonl')
     parser.add_argument('--duration',type=float,default=120)
     parser.add_argument('--windows',type=int,default=1)
+    parser.add_argument('--until-goal',action='store_true')
     parser.add_argument('--result',default=None)
     args = parser.parse_args()
     if not math.isfinite(args.duration) or args.duration <= 0:
