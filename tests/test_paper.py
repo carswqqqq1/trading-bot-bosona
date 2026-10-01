@@ -257,6 +257,33 @@ class PaperJournalTests(unittest.TestCase):
         self.assertEqual(Decimal(result["shares"]), Decimal("5"))
         self.assertLessEqual(Decimal(result["simulated_vwap"]), Decimal(result["source_price"]))
 
+    def test_a_buy_above_85_cents_is_copied_when_the_book_matches_his_price(self):
+        result = self.journal.process(
+            "high", row(price="0.92"), market(),
+            book(asks=[{"price": "0.92", "size": "100"}], bids=[{"price": "0.90", "size": "100"}]),
+            NOW,
+        )
+        self.assertEqual(result["status"], "PAPER_BUY")
+        self.assertFalse(result["rule_skipped"])
+        self.assertEqual(result["slug"], row()["slug"])
+        self.assertEqual(result["side"], "BUY")
+        self.assertLessEqual(Decimal(result["simulated_vwap"]), Decimal("0.92"))
+        self.assertLessEqual(Decimal(result["cent_difference"]), 0)
+
+    def test_non_btc_and_four_hour_markets_are_skipped(self):
+        eth = self.journal.process(
+            "eth", row(slug="eth-updown-5m-999", transaction_hash="0xeth"), market(), book(), NOW,
+        )
+        self.assertEqual(eth["status"], "SKIP")
+        self.assertEqual(eth["reason"], "different_market_or_timeframe")
+        self.assertEqual(self.journal.cash, Decimal("48"))
+        four = self.journal.process(
+            "4h", row(slug="btc-updown-4h-1790812800", transaction_hash="0x4h"), market(), book(), NOW,
+        )
+        self.assertEqual(four["status"], "SKIP")
+        self.assertEqual(four["reason"], "different_market_or_timeframe")
+        self.assertEqual(four["slug"], "btc-updown-4h-1790812800")
+
     def test_paying_above_his_fill_is_skipped_without_a_debit(self):
         late = self.journal.process(
             "late", row(price="0.50"), market(),

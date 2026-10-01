@@ -10,8 +10,13 @@ leader inventory is unknown and unmatched SELLs are refused.
 
 BUY copies keep his side and market only when the live book can buy the
 5-share minimum at his fill price or better. If latency has already moved the
-ask above that price, the buy is skipped. A paper position is sold inside the
-same window when the bid is above its average cost and the sale nets a gain.
+ask above that price, the buy is skipped. His public history does not support
+a skip at 0.85: those prices are a normal part of his buys, and the rows have
+no dollar target to compare with an $80 band. There is no chase-after-a-sell
+skip because those rows are buys, redeems, and merges, not sells. Markets
+outside BTC 5-minute, 15-minute, and hourly windows are skipped. A paper
+position is sold inside the same window when the bid is above its average
+cost and the sale nets a gain.
 Open cost stays under max_open_cost_usd, which is below the cash balance, so
 one burst cannot spend the whole account. These rules do not guarantee a profit.
 """
