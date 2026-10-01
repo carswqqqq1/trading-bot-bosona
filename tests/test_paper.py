@@ -423,6 +423,57 @@ class PaperCTests(unittest.TestCase):
         self.assertEqual(journal.cash, Decimal("39"))
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("5"))
 
+    def test_public_resolution_pays_the_published_outcome_price(self):
+        journal = self.journal()
+        journal.db.execute("UPDATE meta SET value=? WHERE key='cash'", ("30.94321",))
+        up = {"row": row(), "shares": "15", "cost": "4.87433", "leader_shares": "15"}
+        down_row = row(outcome="Down", token_id=TOKEN_DOWN, transaction_hash="0xdown")
+        down = {"row": down_row, "shares": "5", "cost": "3.18246", "leader_shares": "5"}
+        journal.db.execute("INSERT OR REPLACE INTO positions VALUES (?,?)", (TOKEN_UP, json.dumps(up)))
+        journal.db.execute("INSERT OR REPLACE INTO positions VALUES (?,?)", (TOKEN_DOWN, json.dumps(down)))
+        journal.db.commit()
+        resolved = {
+            "slug": row()["slug"], "closed": True, "umaResolutionStatus": "resolved",
+            "outcomes": ["Up", "Down"], "outcomePrices": ["0", "1"],
+            "clobTokenIds": [TOKEN_UP, TOKEN_DOWN], "lastTradePrice": 0.01,
+            "closedTime": "2026-10-01 01:30:54+00",
+        }
+        closes = journal.realize_public_resolutions(lambda url, params=None: resolved, NOW)
+        by_outcome = {item["outcome"]: item for item in closes}
+        self.assertEqual(by_outcome["Up"]["resolution_price"], "0")
+        self.assertEqual(by_outcome["Up"]["proceeds_usd"], "0")
+        self.assertEqual(Decimal(by_outcome["Up"]["realized_pnl_usd"]), Decimal("-4.87433"))
+        self.assertEqual(by_outcome["Down"]["resolution_price"], "1")
+        self.assertEqual(Decimal(by_outcome["Down"]["proceeds_usd"]), Decimal("5"))
+        self.assertEqual(Decimal(by_outcome["Down"]["realized_pnl_usd"]), Decimal("5") - Decimal("3.18246"))
+        self.assertEqual(journal.cash, Decimal("35.94321"))
+        self.assertEqual(sum((p["shares"] for p in journal.holdings().values()), Decimal(0)), 0)
+        self.assertIsNone(by_outcome["Down"]["decision_latency_seconds"])
+        self.assertTrue(any(item.get("equity_reached_78") is False for item in closes))
+        self.assertFalse(any(item.get("equity_reached_78") is True for item in closes))
+        report = journal.portfolio(lambda url, params=None: resolved)
+        self.assertEqual(Decimal(report["realized_pnl_usd"]), Decimal("-3.05679"))
+        self.assertEqual(report["unrealized_pnl_at_liquidation_quote_usd"], "0")
+        self.assertEqual(journal.realize_public_resolutions(lambda url, params=None: resolved, NOW), [])
+        self.assertEqual(journal.cash, Decimal("35.94321"))
+
+    def test_unresolved_market_stays_open_without_a_made_up_price(self):
+        journal = self.journal()
+        seed_position(journal, "5", "2")
+        open_market = {
+            "slug": row()["slug"], "closed": False, "umaResolutionStatus": "proposed",
+            "outcomes": ["Up", "Down"], "outcomePrices": ["0.4", "0.6"],
+            "clobTokenIds": [TOKEN_UP, TOKEN_DOWN], "lastTradePrice": 0.99,
+        }
+        self.assertEqual(journal.realize_public_resolutions(lambda url, params=None: open_market, NOW), [])
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("5"))
+        self.assertEqual(journal.cash, Decimal("39"))
+        missing = dict(open_market, closed=True, umaResolutionStatus="resolved", outcomePrices=None)
+        unavailable = journal.realize_public_resolutions(lambda url, params=None: missing, NOW)
+        self.assertEqual(unavailable[0]["status"], "RESOLUTION_UNAVAILABLE")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("5"))
+        self.assertEqual(journal.cash, Decimal("39"))
+
     def test_steady_loss_resets_cash_and_changes_one_rule(self):
         self.assertFalse(paper.steadily_losing([Decimal("39"), Decimal("39"), Decimal("39")]))
         self.assertFalse(paper.steadily_losing([Decimal("39"), Decimal("38"), Decimal("38")]))

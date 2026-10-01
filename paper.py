@@ -83,6 +83,37 @@ def quote(book, side, quantity, rate, limit=None):
 FIVE = Decimal('5')
 
 
+def public_resolution_price(market, outcome, token):
+    """Payout per share from a resolved Gamma market, or (None, reason).
+
+    The price is the published outcomePrices entry for this outcome. A last
+    trade is not a resolution price.
+    """
+    if not isinstance(market, dict):
+        return None, 'resolution_unavailable'
+    if market.get('umaResolutionStatus') != 'resolved' or market.get('closed') is not True:
+        return None, 'not_resolved'
+    try:
+        outcomes, prices = array(market.get('outcomes')), array(market.get('outcomePrices'))
+        tokens = array(market.get('clobTokenIds'))
+    except (ValueError, TypeError):
+        return None, 'resolution_price_missing'
+    if not isinstance(outcomes, list) or not isinstance(prices, list) or len(outcomes) != len(prices):
+        return None, 'resolution_price_missing'
+    if outcome not in outcomes:
+        return None, 'resolution_outcome_missing'
+    index = outcomes.index(outcome)
+    if isinstance(tokens, list) and len(tokens) == len(outcomes) and str(tokens[index]) != str(token):
+        return None, 'resolution_token_mismatch'
+    try:
+        price = D(prices[index])
+    except (ValueError, TypeError, ArithmeticError):
+        return None, 'resolution_price_missing'
+    if price < 0 or price > 1:
+        return None, 'resolution_price_missing'
+    return price, None
+
+
 def steadily_losing(samples):
     """True when cash plus open value drifts down across the sample.
 
@@ -453,9 +484,10 @@ class PaperJournal:
                 unknown += 1
                 record['unresolved_reason'] = str(exc)
             positions.append(record)
-        fills = [json.loads(x[0]) for x in self.db.execute('SELECT payload FROM seen')]
-        fills = [x for x in fills if x['status'] in ('PAPER_BUY','PAPER_SELL')]
-        realized = sum((D(x.get('realized_pnl_usd','0')) for x in fills),ZERO)
+        seen_rows = [json.loads(x[0]) for x in self.db.execute('SELECT payload FROM seen')]
+        fills = [x for x in seen_rows if x['status'] in ('PAPER_BUY','PAPER_SELL')]
+        realized = sum((D(x['realized_pnl_usd']) for x in seen_rows
+                        if x.get('status') in ('PAPER_SELL','PAPER_RESOLUTION') and x.get('realized_pnl_usd') is not None),ZERO)
         open_cost = sum((p['cost'] for p in self.holdings().values()),ZERO)
         result = dict(status='PORTFOLIO',cash_usd=str(self.cash),positions=positions,
                       unresolved_positions=unknown,quoted_liquidation_usd=str(marked),settlement_simulated=False)
@@ -471,6 +503,68 @@ class PaperJournal:
             result.update(equity_at_liquidation_quote_usd=str(equity),
                           change_from_start_usd=str(equity-D(self.config['starting_cash_usd'])))
         return result
+
+    def realize_public_resolutions(self, fetch=get_json, now=None):
+        """Close paper shares at a published resolution price.
+
+        A market that is not resolved stays open. No price is substituted.
+        """
+        now = time.time() if now is None else now
+        results = []
+        for token, snapshot in list(self.holdings().items()):
+            if snapshot['shares'] <= 0:
+                continue
+            slug = snapshot['row'].get('slug')
+            outcome = snapshot['row'].get('outcome')
+            try:
+                market = fetch('https://gamma-api.polymarket.com/markets/slug/'+urlquote(slug,safe=''))
+            except Exception as exc:
+                results.append(dict(status='RESOLUTION_UNAVAILABLE',paper=True,executed=False,
+                                    token_id=token,slug=slug,outcome=outcome,message=str(exc)))
+                continue
+            price, reason = public_resolution_price(market, outcome, token)
+            if price is None:
+                if reason != 'not_resolved':
+                    results.append(dict(status='RESOLUTION_UNAVAILABLE',paper=True,executed=False,
+                                        token_id=token,slug=slug,outcome=outcome,reason=reason))
+                continue
+            key = 'resolution:'+str(token)
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                if self.contains(key):
+                    continue
+                position = self.holdings().get(token)
+                if not position or position['shares'] <= 0:
+                    continue
+                closed_shares = position['shares']
+                proceeds = closed_shares*price
+                cost = position['cost']
+                realized = proceeds-cost
+                cash = self.cash+proceeds
+                position['shares'] = ZERO
+                position['cost'] = ZERO
+                self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
+                self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
+                                (token,json.dumps(position,default=str)))
+                held_after = sum((p['shares'] for p in self.holdings().values()),ZERO)
+                decision = dict(status='PAPER_RESOLUTION',paper=True,executed=False,side='RESOLVE',
+                                slug=slug,outcome=outcome,token_id=token,shares=str(closed_shares),
+                                resolution_price=str(price),proceeds_usd=str(proceeds),cost_usd=str(cost),
+                                realized_pnl_usd=str(realized),cash_usd=str(cash),
+                                price_source='gamma.outcomePrices',invented_price=False,
+                                umaResolutionStatus=market.get('umaResolutionStatus'),
+                                outcomePrices=market.get('outcomePrices'),outcomes=market.get('outcomes'),
+                                closedTime=market.get('closedTime'),
+                                decision_latency_seconds=None,
+                                latency_note='Public resolution is not one of his fills, so there is no fill-to-action latency.',
+                                his_price=None,our_price=str(price),cent_gap=None,rule_skipped=False)
+                if held_after == 0:
+                    decision['unrealized_pnl_usd'] = '0'
+                    decision['equity_usd'] = str(cash)
+                    decision['equity_reached_78'] = cash >= D('78')
+                self.db.execute('INSERT INTO seen VALUES (?,?)',(key,json.dumps(decision)))
+                results.append(decision)
+        return results
 
     def apply_one_rule_reset(self):
         """Reset cash, drop the open book, and tighten copied sells by one rule.
@@ -528,17 +622,26 @@ def run_paper_c(args, config, journal, observer_start, source_start):
             session_decisions.append(decision)
             window_decisions.append(decision_view(decision, window_index))
 
-        opening = journal.portfolio()
-        opening_equity = D(opening.get('equity_at_liquidation_quote_usd', opening['cash_usd']))
-        equity_samples.append(opening_equity)
         emit(dict(status='STARTED',strategy='paper_c',paper=True,executed=False,live_orders=False,
                   leader_wallet=config['leader_wallet'],starting_cash_usd=str(config['starting_cash_usd']),
-                  cash_usd=str(journal.cash),equity_usd=str(opening_equity),
+                  resumed_cash_usd=str(journal.cash),rule_changed_this_run=False,reset_this_run=False,
                   observer_start_utc=datetime.fromtimestamp(observer_start,timezone.utc).isoformat(),
                   run_started_at_utc=datetime.fromtimestamp(run_started_wall,timezone.utc).isoformat(),
                   poll_seconds=config['poll_seconds'],windows=args.windows,window_seconds=args.duration,
                   latency='seconds from his fill timestamp to the paper copy or skip',
-                  filter='no new buys; copy a sell only when it closes an existing paper position above paper cost'))
+                  filter='copy his buy at his price or better inside the cash; copy a sell only when it closes an existing paper position above paper cost'))
+        for close in journal.realize_public_resolutions(get_json, time.time()):
+            emit(close)
+            if close.get('status')=='PAPER_RESOLUTION':
+                session_decisions.append(close)
+        opening = journal.portfolio()
+        opening_equity = D(opening.get('equity_at_liquidation_quote_usd', opening['cash_usd']))
+        equity_samples.append(opening_equity)
+        emit(dict(status='RESUMED',paper=True,executed=False,cash_usd=str(journal.cash),
+                  equity_usd=str(opening_equity),
+                  unrealized_pnl_usd=opening.get('unrealized_pnl_at_liquidation_quote_usd'),
+                  realized_pnl_usd=opening.get('realized_pnl_usd'),
+                  equity_reached_78=opening_equity>=D('78')))
         try:
             for window_index in range(1, args.windows+1):
                 window_started = time.monotonic()
@@ -600,6 +703,11 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     remaining=args.duration-(time.monotonic()-window_started)
                     if remaining > 0:
                         time.sleep(min(max(0,next_request-time.monotonic()),remaining))
+                for close in journal.realize_public_resolutions(get_json, time.time()):
+                    emit(close)
+                    if close.get('status')=='PAPER_RESOLUTION':
+                        session_decisions.append(close)
+                        window_decisions.append(decision_view(close, window_index))
                 port = journal.portfolio()
                 equity = None if port.get('unresolved_positions') else D(port.get('equity_at_liquidation_quote_usd',port['cash_usd']))
                 if equity is not None:
@@ -613,13 +721,6 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                      open_cost_usd=port['open_cost_usd'],paper=True,executed=False)
                 windows.append(window_record)
                 emit(window_record)
-                # The buy rule is already the one change. Do not change another if this sample is flat or losing.
-                if rule_reset is None and not config.get('copy_buys_at_or_better') and steadily_losing(equity_samples):
-                    reset = journal.apply_one_rule_reset()
-                    reset.update(window_after=window_index,equity_samples_usd=[str(sample) for sample in equity_samples])
-                    rule_reset = reset
-                    emit(reset)
-                    equity_samples=[D(journal.cash)]
         except KeyboardInterrupt:
             pass
         final = journal.portfolio()
@@ -654,16 +755,19 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                                    unrealized_pnl_usd=view['unrealized_pnl_usd'],
                                                    latency_seconds=view['decision_latency_seconds'])
                                               for window in windows for view in window['decisions']],
-                    reset_to_39=True if config.get('copy_buys_at_or_better') else rule_reset is not None,
-                    rule_changed=('copy_buys_at_or_better' if config.get('copy_buys_at_or_better')
-                                  else None if rule_reset is None else rule_reset['rule_changed']),
-                    rule_change_why=('The no-new-buys rule copied nothing, because a later sell cannot close a position that was never opened. '
-                                     'The one change allows his buy, same side and same market, at the moment the trade appears, '
-                                     'only when the book fills at his price or better and the open cost stays inside the $39 cash. '
-                                     'The sell rule is unchanged.'
-                                     if config.get('copy_buys_at_or_better')
-                                     else None if rule_reset is None else rule_reset['why']),
+                    reset_to_39=rule_reset is not None,
+                    rule_changed_this_run=rule_reset is not None,
+                    rule_changed=None if rule_reset is None else rule_reset['rule_changed'],
+                    rule_change_why=None if rule_reset is None else rule_reset['why'],
                     second_rule_changed=False,
+                    closes=[dict(outcome=d.get('outcome'),slug=d.get('slug'),shares=d.get('shares'),
+                                 resolution_price=d.get('resolution_price'),proceeds_usd=d.get('proceeds_usd'),
+                                 cost_usd=d.get('cost_usd'),realized_pnl_usd=d.get('realized_pnl_usd'),
+                                 cash_usd=d.get('cash_usd'),unrealized_pnl_usd=d.get('unrealized_pnl_usd'),
+                                 equity_usd=d.get('equity_usd'),equity_reached_78=d.get('equity_reached_78'),
+                                 decision_latency_seconds=d.get('decision_latency_seconds'),
+                                 latency_note=d.get('latency_note'),price_source=d.get('price_source'))
+                            for d in session_decisions if d.get('status')=='PAPER_RESOLUTION'],
                     book_was_steadily_losing=rule_reset is not None,
                     goal_usd='78',goal_reached=goal_reached,poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
