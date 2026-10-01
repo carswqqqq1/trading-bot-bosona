@@ -76,29 +76,31 @@ def quote(book, side, quantity, rate, limit=None):
 FIVE = Decimal('5')
 
 
-def buy_entry(book, source_price, rate, tick, minimum, budget, open_room, per_buy_room):
+def buy_entry(book, source_price, rate, tick, minimum, budget, open_room, per_buy_room, worse_than_leader=ZERO):
     """Size a BUY at the 5-share minimum, or raise a rule name.
 
-    The fill must be at his price or better. A worse ask means latency already
-    forced a worse price, so the buy is skipped. Passing does not guarantee a profit.
+    The fill must be at his price, better, or at most worse_than_leader above it.
+    A worse ask means latency already forced a worse price, so the buy is skipped.
+    Passing does not guarantee a profit. The copied market and side are his.
     """
     if budget <= 0:
         if open_room <= 0 and per_buy_room > 0:
             raise ValueError('open_risk_cap')
         raise ValueError('five_shares_exceed_per_buy_budget')
+    ceiling = source_price + worse_than_leader
     asks = levels(book, 'BUY')
     if not asks:
         raise ValueError('five_shares_not_at_or_better_than_leader_fill')
-    if asks[0][0] > source_price:
+    if asks[0][0] > ceiling:
         raise ValueError('latency_worse_than_leader_price')
     required = max(minimum, FIVE)
     required = (required / STEP).to_integral_value(rounding=ROUND_CEILING) * STEP
-    limit = (source_price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+    limit = (ceiling / tick).to_integral_value(rounding=ROUND_DOWN) * tick
     try:
         preview = quote(book, 'BUY', required, rate, limit)
     except ValueError:
         raise ValueError('five_shares_not_at_or_better_than_leader_fill')
-    if preview['vwap'] > source_price:
+    if preview['vwap'] > ceiling:
         raise ValueError('latency_worse_than_leader_price')
     debit = preview['gross'] + preview['fee']
     if debit > budget:
@@ -250,7 +252,8 @@ class PaperJournal:
                     open_room = D(self.config['max_open_cost_usd'])-exposure
                     budget = min(per_buy_room, open_room)
                     quantity, limit = buy_entry(
-                        book, source_price, rate, tick, minimum, budget, open_room, per_buy_room)
+                        book, source_price, rate, tick, minimum, budget, open_room, per_buy_room,
+                        D(self.config.get('max_worse_than_leader', 0)))
                 else:
                     if not leader_before or source_shares > leader_before:
                         raise ValueError('unmatched_source_sell_baseline_inventory_unknown')
@@ -283,6 +286,14 @@ class PaperJournal:
             except (ValueError, KeyError, TypeError) as exc:
                 decision['reason'] = str(exc)
             decision['rule_skipped'] = decision['status'] == 'SKIP'
+            our_price = decision.get('simulated_vwap')
+            if our_price is None:
+                our_price = (decision.get('minimum_size_price_comparison') or {}).get('snapshot_vwap')
+            if our_price is not None and decision.get('source_price') is not None:
+                decision['our_price'] = str(our_price)
+                decision['his_price'] = str(decision['source_price'])
+                # Positive means we would pay more than his fill. Same side and market.
+                decision['cent_difference'] = str((D(our_price)-D(decision['source_price']))*100)
             position['row'] = row
             payload = json.dumps(position,default=str)
             self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',(token,payload))
@@ -373,9 +384,9 @@ class PaperJournal:
         open_cost = sum((p['cost'] for p in self.holdings().values()),ZERO)
         result = dict(status='PORTFOLIO',cash_usd=str(self.cash),positions=positions,
                       unresolved_positions=unknown,quoted_liquidation_usd=str(marked),settlement_simulated=False)
-        result.update(total_simulated_fees_usd=str(sum((D(x['fee']) for x in fills),ZERO)),
-                      source_price_slippage_cost_usd=str(sum((D(x['source_price_slippage_cost_usd']) for x in fills),ZERO)),
-                      fee_delta_vs_hypothetical_source_price_usd=str(sum((D(x['fee_delta_vs_hypothetical_source_price_usd']) for x in fills),ZERO)),
+        result.update(total_simulated_fees_usd=str(sum((D(x.get('fee','0')) for x in fills),ZERO)),
+                      source_price_slippage_cost_usd=str(sum((D(x.get('source_price_slippage_cost_usd','0')) for x in fills),ZERO)),
+                      fee_delta_vs_hypothetical_source_price_usd=str(sum((D(x.get('fee_delta_vs_hypothetical_source_price_usd','0')) for x in fills),ZERO)),
                       hypothetical_source_fee_assumption='Same quantity and taker fee schedule at leader price; actual leader fees unknown.',
                       realized_pnl_usd=str(realized),open_cost_usd=str(open_cost),simulated_fills=len(fills),
                       slippage_interpretation='Price difference at observed snapshot; not a causal latency estimate.')
@@ -409,6 +420,8 @@ def main():
         raise ValueError('target_buy_usd must be positive and within max_buy_usd')
     if D(config['max_open_cost_usd']) >= D(config['starting_cash_usd']):
         raise ValueError('max_open_cost_usd must stay below starting cash')
+    if 'max_worse_than_leader' in config and D(config['max_worse_than_leader']) < 0:
+        raise ValueError('max_worse_than_leader cannot be negative')
     journal = PaperJournal(args.db,config)
     stored = journal.db.execute("SELECT value FROM meta WHERE key='observer_start'").fetchone()
     observer_start = int(stored[0]) if stored else int(time.time())

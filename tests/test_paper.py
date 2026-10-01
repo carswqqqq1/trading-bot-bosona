@@ -111,6 +111,9 @@ class PaperJournalTests(unittest.TestCase):
         self.assertLessEqual(holding["cost"], Decimal(self.config["max_buy_usd"]))
         self.assertEqual(Decimal(result["source_price"]), Decimal("0.50"))
         self.assertEqual(Decimal(result["simulated_vwap"]), Decimal("0.50"))
+        self.assertEqual(Decimal(result["his_price"]), Decimal("0.50"))
+        self.assertEqual(Decimal(result["our_price"]), Decimal("0.50"))
+        self.assertEqual(Decimal(result["cent_difference"]), Decimal("0"))
         self.assertEqual(Decimal(result["source_price_slippage_cost_usd"]), Decimal("0"))
         source_fee = (shares * Decimal("0.1") * Decimal("0.50") * Decimal("0.50")).quantize(Decimal("0.00001"))
         self.assertEqual(Decimal(result["source_price_fee_estimate_usd"]), source_fee)
@@ -262,6 +265,8 @@ class PaperJournalTests(unittest.TestCase):
         self.assertEqual(late["status"], "SKIP")
         self.assertEqual(late["reason"], "latency_worse_than_leader_price")
         self.assertTrue(late["rule_skipped"])
+        self.assertEqual(late["slug"], row()["slug"])
+        self.assertGreater(Decimal(late["cent_difference"]), 0)
         self.assertEqual(self.journal.cash, Decimal("48"))
         better = self.journal.process(
             "better", row(transaction_hash="0xbetter", price="0.52"), market(), book(), NOW,
@@ -286,6 +291,8 @@ class PaperJournalTests(unittest.TestCase):
         self.assertGreater(Decimal(exited["realized_pnl_usd"]), 0)
         self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"], 0)
         self.assertGreater(self.journal.cash, Decimal("48") - Decimal(bought["gross"]) - Decimal(bought["fee"]))
+        report = self.journal.portfolio(lambda url, params=None: market() if "/markets/slug/" in url else book(timestamp=NOW * 1000))
+        self.assertGreater(Decimal(report["realized_pnl_usd"]), 0)
 
 
 if __name__ == "__main__":
