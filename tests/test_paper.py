@@ -730,6 +730,24 @@ class PaperCTests(unittest.TestCase):
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
         self.assertIsNone(journal.realize_same_minute_if_bid_above_cost(quiet, book(bids=[]), NOW))
 
+    def test_goal_clock_stays_empty_until_equity_reaches_75(self):
+        self.assertIsNone(paper.seconds_from_start_to_goal(100, 160, Decimal("37.40"), Decimal("75")))
+        self.assertEqual(paper.seconds_from_start_to_goal(100, 250.2, Decimal("75"), Decimal("75")), 150.2)
+        journal = self.journal()
+        first = paper.book_started_at(journal, 1_800_000_000)
+        again = paper.book_started_at(journal, 1_800_000_100)
+        self.assertEqual(first, again)
+        self.assertEqual(first, 1_800_000_000)
+        self.assertIsNone(paper.mark_goal_reached(journal, 1_800_000_100, Decimal("37.40"), Decimal("75")))
+        crossed = paper.mark_goal_reached(journal, 1_800_000_250.2, Decimal("75"), Decimal("75"))
+        later = paper.mark_goal_reached(journal, 1_800_000_900, Decimal("80"), Decimal("75"))
+        dipped = paper.mark_goal_reached(journal, 1_800_000_950, Decimal("37.40"), Decimal("75"))
+        back = paper.mark_goal_reached(journal, 1_800_001_000, Decimal("75"), Decimal("75"))
+        self.assertEqual(crossed, 250.2)
+        self.assertEqual(later, 250.2)
+        self.assertIsNone(dipped)
+        self.assertEqual(back, 250.2)
+
     def test_paper_c_config_starts_at_3740_with_a_75_goal(self):
         raw = json.loads((Path(__file__).resolve().parents[1] / "config.paperc.json").read_text())
         self.assertEqual(raw["leader_wallet"], "0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed")
