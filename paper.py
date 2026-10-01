@@ -14,10 +14,12 @@ one burst cannot spend the whole account. These rules do not guarantee a profit.
 
 strategy "paper_c" is a separate filter. A sell is copied only when it
 closes an existing paper position above paper cost. With no matching position
-the sell is skipped when it appears. copy_buys_at_or_better is the one rule
-change: his buy, his market, at his price or better, and only inside the cash.
-Decision latency is his fill timestamp to that copy or skip. The paper48 path
-is unchanged.
+the sell is skipped when it appears. copy_buys_at_or_better copies his buy on
+the same side and market, for the same number of shares, only when the book
+fills that size at his price or better. The market minimum is still 5 shares.
+If that size costs more than the cash on hand, the buy is skipped and is not
+scaled down. Decision latency is his fill timestamp to that copy or skip. The
+paper48 path is unchanged.
 """
 import argparse
 import json
@@ -312,6 +314,7 @@ class PaperJournal:
                         interpretation='Hypothetical minimum-size quote, not an account fill or causal latency estimate.')
                 except ValueError:
                     pass
+                exact_buy = False
                 if self.config.get('strategy')=='paper_c' and row['side']=='SELL':
                     # His sell, his market, and only a close that nets a gain above paper cost.
                     quantity = position['shares'].quantize(STEP,rounding=ROUND_DOWN)
@@ -339,6 +342,28 @@ class PaperJournal:
                     if position['shares']==0:
                         position['cost'] = ZERO
                     decision['realized_pnl_usd'] = str(net-removed_cost)
+                elif row['side']=='BUY' and self.config.get('strategy')=='paper_c' and self.config.get('copy_buys_at_or_better'):
+                    # His exact share count. Never a smaller clip. Cash that cannot
+                    # cover that size skips the buy.
+                    quantity = source_shares
+                    if quantity < max(minimum, FIVE):
+                        raise ValueError('below_market_minimum')
+                    limit = (source_price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+                    if limit <= 0:
+                        raise ValueError('invalid_source_price')
+                    try:
+                        fill = quote(book,'BUY',quantity,rate,limit)
+                    except ValueError:
+                        raise ValueError('his_size_not_at_or_better_than_his_price')
+                    if fill['vwap'] > source_price:
+                        raise ValueError('latency_worse_than_leader_price')
+                    debit = fill['gross']+fill['fee']
+                    if debit > self.cash:
+                        raise ValueError('his_size_exceeds_cash')
+                    cash = self.cash-debit
+                    position['shares'] += quantity
+                    position['cost'] += debit
+                    exact_buy = True
                 elif row['side']=='BUY':
                     exposure = sum((p['cost'] for p in positions.values()),ZERO)
                     per_buy_room = min(self.cash,D(self.config['max_buy_usd']),
@@ -353,7 +378,7 @@ class PaperJournal:
                         raise ValueError('unmatched_source_sell_baseline_inventory_unknown')
                     quantity = (position['shares']*source_shares/leader_before).quantize(STEP,rounding=ROUND_DOWN)
                     limit = max(ZERO,source_price-drift)
-                if not (self.config.get('strategy')=='paper_c' and row['side']=='SELL'):
+                if not (self.config.get('strategy')=='paper_c' and row['side']=='SELL') and not exact_buy:
                     if quantity < minimum or quantity <= 0:
                         raise ValueError('below_market_minimum_or_budget_cap')
                     fill = quote(book,row['side'],quantity,rate,limit)
@@ -629,7 +654,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                   run_started_at_utc=datetime.fromtimestamp(run_started_wall,timezone.utc).isoformat(),
                   poll_seconds=config['poll_seconds'],windows=args.windows,window_seconds=args.duration,
                   latency='seconds from his fill timestamp to the paper copy or skip',
-                  filter='copy his buy at his price or better inside the cash; copy a sell only when it closes an existing paper position above paper cost'))
+                  filter='copy his exact share count, same side and market, only when the book fills at his price or better; skip the buy when that size costs more than cash; copy a sell only when it closes an existing paper position above paper cost'))
         for close in journal.realize_public_resolutions(get_json, time.time()):
             emit(close)
             if close.get('status')=='PAPER_RESOLUTION':
@@ -771,7 +796,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     book_was_steadily_losing=rule_reset is not None,
                     goal_usd='78',goal_reached=goal_reached,poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
-                    filter=('Copy his buy, same side and market, only when the book fills at his price or better and the open cost stays inside the cash. '
+                    filter=('Copy his exact share count, same side and market, only when the book fills at his price or better. '
+                            'Skip that buy when the size costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. '
                             'Copy a sell only when it closes an existing paper position above paper cost.'
                             if config.get('copy_buys_at_or_better') else
                             'Do not open new buys. Copy a sell only when it closes an existing paper position above paper cost. Skip when there is no matching paper position.'),

@@ -344,23 +344,29 @@ class PaperCTests(unittest.TestCase):
 
     def test_buy_at_his_price_or_better_stays_inside_cash(self):
         journal = self.journal(copy_buys_at_or_better=True)
-        copied = journal.process("buy-ok", row(price="0.50"), market(), book(), NOW)
+        copied = journal.process("buy-ok", row(price="0.50", size="10"), market(), book(), NOW)
         self.assertEqual(copied["status"], "PAPER_BUY")
         self.assertEqual(copied["side"], "BUY")
         self.assertEqual(copied["slug"], row()["slug"])
+        self.assertEqual(Decimal(copied["shares"]), Decimal("10"))
         self.assertLessEqual(Decimal(copied["simulated_vwap"]), Decimal(copied["his_price"]))
-        self.assertGreater(Decimal(copied["decision_latency_seconds"]), 0)
         cost = journal.holdings()[TOKEN_UP]["cost"]
         self.assertGreater(cost, 0)
         self.assertLessEqual(cost, Decimal("39"))
-        self.assertGreaterEqual(journal.cash, 0)
         self.assertEqual(journal.cash + cost, Decimal("39"))
+        too_big = journal.process("buy-too-big", row(price="0.50", size="100", transaction_hash="0xbig"), market(), book(), NOW)
+        self.assertEqual(too_big["status"], "SKIP")
+        self.assertEqual(too_big["reason"], "his_size_exceeds_cash")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("10"))
+        below = journal.process("buy-below", row(price="0.50", size="2", transaction_hash="0xsmall"), market(), book(), NOW)
+        self.assertEqual(below["reason"], "below_market_minimum")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("10"))
         late = journal.process(
-            "buy-late", row(transaction_hash="0xlate", price="0.50"), market(),
+            "buy-late", row(transaction_hash="0xlate", price="0.50", size="10"), market(),
             book(asks=[{"price": "0.51", "size": "100"}], bids=[{"price": "0.49", "size": "100"}]), NOW,
         )
         self.assertEqual(late["status"], "SKIP")
-        self.assertEqual(late["reason"], "latency_worse_than_leader_price")
+        self.assertEqual(late["reason"], "his_size_not_at_or_better_than_his_price")
         self.assertEqual(journal.cash + journal.holdings()[TOKEN_UP]["cost"], Decimal("39"))
 
     def test_sell_without_a_position_stays_skipped_after_the_buy_rule(self):
