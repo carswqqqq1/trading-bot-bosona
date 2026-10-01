@@ -1,0 +1,22 @@
+{
+  "name": "Paper C",
+  "paper_only": true,
+  "live_orders": false,
+  "book_reset": false,
+  "still_running": true,
+  "book": "/tmp/paperc-5m.sqlite3",
+  "starting_cash_usd": "37.40",
+  "cash_usd": "14.23842572333333333333333333",
+  "realized_pnl_usd": "-23.16157427666666666666666667",
+  "fees_usd": "3.35538",
+  "open_cost_usd": "0",
+  "buys": 16,
+  "median_buy_latency_seconds": 4.6745,
+  "goal_usd": "75",
+  "cash_reached_75": false,
+  "seconds_since_start": 8929.101,
+  "seconds_from_start_to_goal": null,
+  "rule": "printed btc-updown-5m only; his exact size; his price or better; sell in the opening minute so a new position does not sit unmarked",
+  "copies_are": "his public activity prints only",
+  "note": "Cash was $50.17042572 with nothing open, then three exact btc-updown-5m-1790879100 Up buys were copied before the same-minute sell was on. That Up resolved at 0 with no fee, so cash is $14.23842572 and nothing is open. The book was not reset. New copies sell in the minute they open."
+}

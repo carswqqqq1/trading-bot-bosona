@@ -233,5 +233,149 @@ class WatcherTests(unittest.TestCase):
             self.assertEqual(restarted.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 2)
 
 
+class PublicClientTests(unittest.TestCase):
+    def test_429_backoff_does_not_send_again_until_it_expires(self):
+        now = [0.0]
+        calls = []
+
+        def opener(host, path):
+            calls.append((host, path, now[0]))
+            if len(calls) == 1:
+                return 429, {"retry-after": "2"}, b""
+            return 200, {}, b'{"ok": true}'
+
+        client = bot.PublicClient(opener=opener, clock=lambda: now[0])
+        with self.assertRaises(bot.RateLimited) as raised:
+            client.get_json("https://clob.polymarket.com/book", {"token_id": "1"})
+        self.assertEqual(raised.exception.retry_after, 2.0)
+        with self.assertRaises(bot.RateLimited):
+            client.get_json("https://clob.polymarket.com/book", {"token_id": "2"})
+        self.assertEqual(len(calls), 1)
+        now[0] = 2.0
+        self.assertEqual(client.get_json("https://clob.polymarket.com/book", {"token_id": "2"}), {"ok": True})
+        self.assertEqual(len(calls), 2)
+
+    def test_missing_retry_after_grows_and_a_success_resets_it(self):
+        now = [0.0]
+        mode = ["429"]
+        calls = []
+
+        def opener(host, path):
+            calls.append(now[0])
+            if mode[0] == "429":
+                return 429, {}, b""
+            return 200, {}, b'{"ok": 1}'
+
+        client = bot.PublicClient(opener=opener, clock=lambda: now[0])
+        with self.assertRaises(bot.RateLimited) as first:
+            client.get_json("https://clob.polymarket.com/book")
+        self.assertEqual(first.exception.retry_after, 1.0)
+        now[0] = 1.0
+        with self.assertRaises(bot.RateLimited) as second:
+            client.get_json("https://clob.polymarket.com/book")
+        self.assertEqual(second.exception.retry_after, 2.0)
+        now[0] = 1.5
+        with self.assertRaises(bot.RateLimited):
+            client.get_json("https://clob.polymarket.com/book")
+        self.assertEqual(len(calls), 2)
+        now[0] = 3.0
+        mode[0] = "ok"
+        self.assertEqual(client.get_json("https://clob.polymarket.com/book"), {"ok": 1})
+        mode[0] = "429"
+        with self.assertRaises(bot.RateLimited) as reset:
+            client.get_json("https://clob.polymarket.com/book")
+        self.assertEqual(reset.exception.retry_after, 1.0)
+
+    def test_market_cache_skips_a_second_fetch(self):
+        calls = []
+
+        def opener(host, path):
+            calls.append(path)
+            return 200, {}, b'{"slug": "btc-updown-5m-1", "closed": false}'
+
+        client = bot.PublicClient(opener=opener, clock=lambda: 0.0, market_ttl=30)
+        url = "https://gamma-api.polymarket.com/markets/slug/btc-updown-5m-1"
+        first = client.get_json(url)
+        second = client.get_json(url)
+        self.assertEqual(first, second)
+        self.assertEqual(len(calls), 1)
+        first["closed"] = True
+        self.assertIs(client.get_json(url)["closed"], False)
+        self.assertEqual(len(calls), 1)
+
+    def test_book_is_not_served_from_the_market_cache(self):
+        calls = []
+
+        def opener(host, path):
+            calls.append(path)
+            return 200, {}, b'{"asks": []}'
+
+        client = bot.PublicClient(opener=opener, clock=lambda: 0.0)
+        client.get_json("https://clob.polymarket.com/book", {"token_id": "9"})
+        client.get_json("https://clob.polymarket.com/book", {"token_id": "9"})
+        self.assertEqual(len(calls), 2)
+
+    def test_one_connection_is_reused_for_a_host(self):
+        made = []
+
+        class Conn:
+            def __init__(self, host, timeout=10):
+                made.append(host)
+                self.status = 200
+
+            def request(self, method, path, headers=None):
+                self.path = path
+
+            def getresponse(self):
+                return self
+
+            def read(self):
+                return b'{"ok": true}'
+
+            def getheaders(self):
+                return []
+
+            def close(self):
+                pass
+
+        client = bot.PublicClient(connector=Conn, clock=lambda: 0.0)
+        self.assertEqual(client.get_json("https://clob.polymarket.com/book", {"token_id": "1"}), {"ok": True})
+        self.assertEqual(client.get_json("https://clob.polymarket.com/book", {"token_id": "2"}), {"ok": True})
+        self.assertEqual(made, ["clob.polymarket.com"])
+
+    def test_concurrent_pollers_share_one_request(self):
+        import threading
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def opener(host, path):
+            calls.append(path)
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return 200, {}, b'{"slug": "x"}'
+
+        client = bot.PublicClient(opener=opener, clock=lambda: 0.0)
+        url = "https://gamma-api.polymarket.com/markets/slug/x"
+        errors = []
+
+        def run():
+            try:
+                client.get_json(url)
+            except Exception as exc:
+                errors.append(exc)
+
+        first = threading.Thread(target=run)
+        second = threading.Thread(target=run)
+        first.start()
+        self.assertTrue(entered.wait(1))
+        second.start()
+        release.set()
+        first.join(2)
+        second.join(2)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
