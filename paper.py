@@ -180,11 +180,68 @@ def stream_trade_row(payload, wallet):
                 slug=payload.get('slug'), outcome=payload.get('outcome'), is_combo=False)
 
 
+def active_btc_slugs(now):
+    """Current and next BTC windows. Used only to warm public market metadata."""
+    from zoneinfo import ZoneInfo
+    now = int(now)
+    slugs = []
+    for step, name in ((300, '5m'), (900, '15m')):
+        start = now // step * step
+        slugs.append(f'btc-updown-{name}-{start}')
+        slugs.append(f'btc-updown-{name}-{start + step}')
+    et = datetime.fromtimestamp(now, ZoneInfo('America/New_York'))
+    hour = int(et.strftime('%I'))
+    slugs.append(
+        f"bitcoin-up-or-down-{et.strftime('%B').lower()}-{et.day}-{et.year}-{hour}{et.strftime('%p').lower()}-et"
+    )
+    return slugs
+
+
+class MarketCache:
+    """Keep Gamma metadata for the open BTC windows so a fill does not wait on it."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.markets = {}
+        self.stop = threading.Event()
+        self.ready = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='paper-market-cache', daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def close(self):
+        self.stop.set()
+
+    def get(self, slug, max_age=120):
+        with self.lock:
+            item = self.markets.get(slug)
+        if not item or time.time() - item[0] > max_age:
+            return None
+        return item[1]
+
+    def _run(self):
+        while not self.stop.is_set():
+            for slug in active_btc_slugs(time.time()):
+                if self.stop.is_set():
+                    return
+                try:
+                    market = paper_get_json('https://gamma-api.polymarket.com/markets/slug/' + urlquote(slug, safe=''))
+                except Exception:
+                    continue
+                if isinstance(market, dict) and market.get('slug') == slug:
+                    with self.lock:
+                        self.markets[slug] = (time.time(), market)
+                    self.ready.set()
+            self.stop.wait(1.5)
+
+
 class PublicTradeFeed:
     """Push one leader's public trades as they arrive. Never sends an order."""
 
-    def __init__(self, wallet):
+    def __init__(self, wallet, prepare=None):
         self.wallet = wallet
+        self.prepare = prepare
         self.queue = queue.Queue()
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self._run, name='paper-trade-feed', daemon=True)
@@ -259,7 +316,13 @@ class PublicTradeFeed:
                 body = msg.get('payload') if isinstance(msg, dict) else None
                 row = stream_trade_row(body, self.wallet)
                 if row is not None:
-                    self.queue.put(('trade', time.time(), row))
+                    seen_at = time.time()
+                    if self.prepare is not None:
+                        try:
+                            self.prepare(row)
+                        except Exception:
+                            pass
+                    self.queue.put(('trade', seen_at, row))
         finally:
             try:
                 raw.close()
@@ -831,7 +894,7 @@ def main():
                   copy_price_min=config.get('copy_price_min'),copy_price_max=config.get('copy_price_max'),
                   exit_window_seconds=config.get('exit_window_seconds'),
                   signal_transport=transport,
-                  latency_policy=('Public trade stream. Decide when his fill frame arrives, before another poll. Out-of-band buys skip before the book fetch.'
+                  latency_policy=('Public trade stream. The book read starts inside the frame handler, before the decision thread wakes, using a warm connection and cached market metadata.'
                                   if transport == 'websocket' else
                                   'Act on the newest fill in the first public page before older pages or older rows. Out-of-band buys are decided before a book fetch.')))
         def handle_rows(rows, preserve_order=False, received_at=None):
@@ -852,11 +915,16 @@ def main():
                             reason = 'outside_copy_price_band'
                     except (ValueError, KeyError, TypeError, ArithmeticError):
                         reason = None
-                market_future = book_future = None
+                market_future = row.pop('_market_future', None)
+                book_future = row.pop('_book_future', None)
+                cached_market = row.pop('_cached_market', None)
                 if not reason:
-                    # Start the public book read before logging, so the decision is not waiting on disk.
-                    market_future = pool.submit(paper_get_json, 'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'], safe=''))
-                    book_future = pool.submit(paper_get_json, 'https://clob.polymarket.com/book', {'token_id':row['token_id']})
+                    # A frame-time future is already running for stream trades.
+                    # Fall back to a fetch here for the polled path.
+                    if book_future is None:
+                        book_future = pool.submit(paper_get_json, 'https://clob.polymarket.com/book', {'token_id':row['token_id']})
+                    if cached_market is None and market_future is None:
+                        market_future = pool.submit(paper_get_json, 'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'], safe=''))
                 if first:
                     emit(dict(status='OBSERVED',event_id=key,side=row['side'],slug=row['slug'],
                               outcome=row.get('outcome'),price=row.get('price'),
@@ -866,13 +934,14 @@ def main():
                               source_to_first_seen_seconds=round(observations[key]['delay'],3),
                               continuous_run_latency_sample=observations[key]['continuous_sample'],
                               seen_before_run_start=not observations[key]['continuous_sample']))
-                planned.append((key, row, market_future, book_future, reason))
-            for key, row, market_future, book_future, reason in planned:
+                planned.append((key, row, market_future, book_future, cached_market, reason))
+            for key, row, market_future, book_future, cached_market, reason in planned:
                 try:
                     if reason:
                         decision = journal.process(key, row, {}, {}, time.time(), skip_reason=reason)
                     else:
-                        decision = journal.process(key, row, market_future.result(), book_future.result(), time.time())
+                        market = cached_market if cached_market is not None else market_future.result()
+                        decision = journal.process(key, row, market, book_future.result(), time.time())
                     note_decision(decision)
                     emit(decision)
                 except Exception as exc:
@@ -901,9 +970,46 @@ def main():
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))
         feed = None
+        market_cache = None
         try:
             if transport == 'websocket':
-                feed = PublicTradeFeed(config['leader_wallet'])
+                market_cache = MarketCache()
+                market_cache.start()
+                market_cache.ready.wait(2.5)
+                def warm(_index):
+                    slug = active_btc_slugs(time.time())[0]
+                    try:
+                        warmed = paper_get_json('https://gamma-api.polymarket.com/markets/slug/'+urlquote(slug, safe=''))
+                        tokens = array((warmed or {}).get('clobTokenIds') or [])
+                        if tokens:
+                            paper_get_json('https://clob.polymarket.com/book', {'token_id': tokens[0]})
+                    except Exception:
+                        return None
+                for fut in [pool.submit(warm, i) for i in range(8)]:
+                    fut.result()
+                def prepare(row):
+                    try:
+                        stamp = int(row['timestamp'])
+                    except (TypeError, ValueError):
+                        return
+                    if stamp < run_started_wall:
+                        return
+                    try:
+                        if outside_copy_band(row, config):
+                            return
+                    except (ValueError, KeyError, TypeError, ArithmeticError):
+                        return
+                    if source_skip(dict(row, side='BUY'), config, time.time()):
+                        return
+                    cached = market_cache.get(row.get('slug'))
+                    if cached is not None:
+                        row['_cached_market'] = cached
+                    else:
+                        row['_market_future'] = pool.submit(
+                            paper_get_json, 'https://gamma-api.polymarket.com/markets/slug/'+urlquote(str(row.get('slug') or ''), safe=''))
+                    row['_book_future'] = pool.submit(
+                        paper_get_json, 'https://clob.polymarket.com/book', {'token_id': row['token_id']})
+                feed = PublicTradeFeed(config['leader_wallet'], prepare=prepare)
                 feed.start()
                 while time.monotonic()-started < args.duration:
                     try:
@@ -953,6 +1059,8 @@ def main():
         finally:
             if feed is not None:
                 feed.close()
+            if market_cache is not None:
+                market_cache.close()
         close_windows()
         while closed_windows < planned_windows:
             closed_windows += 1

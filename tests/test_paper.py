@@ -356,6 +356,12 @@ class PaperJournalTests(unittest.TestCase):
         kept = paper.fresh_trades([older, newer], lambda key: False, config(), NOW - 30, preserve_order=True)
         self.assertEqual([item[1]["transaction_hash"] for item in kept], ["0xold", "0xnew"])
 
+    def test_active_btc_slugs_include_the_open_5m_window(self):
+        slugs = paper.active_btc_slugs(NOW)
+        self.assertIn(f"btc-updown-5m-{NOW // 300 * 300}", slugs)
+        self.assertIn(f"btc-updown-15m-{NOW // 900 * 900}", slugs)
+        self.assertTrue(any(slug.startswith("bitcoin-up-or-down-") and slug.endswith("-et") for slug in slugs))
+
     def test_stream_trade_row_keeps_only_his_fill(self):
         payload = {
             "proxyWallet": WALLET, "transactionHash": "0xhash", "conditionId": CONDITION,
