@@ -35,6 +35,14 @@ ZERO = Decimal(0)
 STEP = Decimal('0.01')
 
 
+def exit_in_entry_minute(source_timestamp, now):
+    """A paper sell qualifies only in the minute of his fill."""
+    if source_timestamp is None:
+        return False
+    age = float(now) - int(source_timestamp)
+    return 0 <= age <= 60
+
+
 def fee_rate(market):
     if market.get('feesEnabled') is False:
         return ZERO
@@ -577,6 +585,8 @@ def main():
         def exit_scan():
             for token,position in list(journal.holdings().items()):
                 if position['shares']<=0:
+                    continue
+                if not exit_in_entry_minute(position['row'].get('timestamp'), time.time()):
                     continue
                 try:
                     hit=quotes.take(token, position['row'].get('slug'), time.time(), 1.0)

@@ -296,5 +296,13 @@ class PaperJournalTests(unittest.TestCase):
         self.assertGreater(Decimal(report["realized_pnl_usd"]), 0)
 
 
+class EntryMinuteExitTests(unittest.TestCase):
+    def test_exit_qualifies_only_within_sixty_seconds_of_his_fill(self):
+        self.assertTrue(paper.exit_in_entry_minute(1000, 1000))
+        self.assertTrue(paper.exit_in_entry_minute(1000, 1060))
+        self.assertFalse(paper.exit_in_entry_minute(1000, 1060.1))
+        self.assertFalse(paper.exit_in_entry_minute(None, 1000))
+
+
 if __name__ == "__main__":
     unittest.main()
