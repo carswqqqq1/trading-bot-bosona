@@ -134,10 +134,15 @@ def paper_get_json(base, params=None):
 
 
 def _https_conn(host):
-    conns = getattr(_HTTP, 'conns', None)
+    """One TLS connection per thread. A shared connection can stall the book read."""
+    local = getattr(_HTTP, 'local', None)
+    if local is None:
+        local = threading.local()
+        _HTTP.local = local
+    conns = getattr(local, 'conns', None)
     if conns is None:
         conns = {}
-        _HTTP.conns = conns
+        local.conns = conns
     conn = conns.get(host)
     if conn is None:
         conn = http.client.HTTPSConnection(host, timeout=4)
@@ -146,13 +151,21 @@ def _https_conn(host):
 
 
 def _drop_https_conn(host):
-    conns = getattr(_HTTP, 'conns', None) or {}
+    local = getattr(_HTTP, 'local', None)
+    conns = getattr(local, 'conns', None) if local is not None else None
+    if not conns:
+        return
     conn = conns.pop(host, None)
     if conn is not None:
         try:
             conn.close()
         except Exception:
             pass
+
+
+def _ready(fut, seconds=5):
+    """Bound a public book or market read so one stall cannot freeze decisions."""
+    return fut.result(timeout=seconds)
 
 
 def stream_trade_row(payload, wallet):
@@ -811,6 +824,7 @@ def main():
     args = parser.parse_args()
     if not math.isfinite(args.duration) or args.duration <= 0:
         parser.error('duration must be positive and finite')
+    socket.setdefaulttimeout(8)
     raw_config = json.loads(Path(args.config).read_text())
     # Transport is not part of the stored strategy. Reusing a paper db must keep cash.
     transport = str(raw_config.pop('signal_transport', 'poll'))
@@ -868,7 +882,7 @@ def main():
             while closed_windows < planned_windows and elapsed >= (closed_windows+1)*60:
                 closed_windows += 1
                 try:
-                    snapshot = journal.portfolio()
+                    snapshot = journal.portfolio(paper_get_json)
                 except Exception as exc:
                     snapshot = dict(cash_usd=str(journal.cash), message=str(exc))
                 snapshot.update(status='WINDOW',window=closed_windows,paper=True,executed=False,
@@ -927,8 +941,8 @@ def main():
                     if reason:
                         decision = journal.process(key, row, {}, {}, time.time(), skip_reason=reason)
                     else:
-                        market = cached_market if cached_market is not None else market_future.result()
-                        decision = journal.process(key, row, market, book_future.result(), time.time())
+                        market = cached_market if cached_market is not None else _ready(market_future)
+                        decision = journal.process(key, row, market, _ready(book_future), time.time())
                     note_decision(decision)
                     emit(decision)
                 except Exception as exc:
@@ -951,7 +965,7 @@ def main():
                 try:
                     market_future=pool.submit(paper_get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
                     book_future=pool.submit(paper_get_json,'https://clob.polymarket.com/book',{'token_id':token})
-                    exited=journal.realize_if_bid_above_cost(market_future.result(),book_future.result(),time.time())
+                    exited=journal.realize_if_bid_above_cost(_ready(market_future),_ready(book_future),time.time())
                     if exited:
                         emit(exited)
                 except Exception as exc:
@@ -973,7 +987,10 @@ def main():
                     except Exception:
                         return None
                 for fut in [pool.submit(warm, i) for i in range(8)]:
-                    fut.result()
+                    try:
+                        _ready(fut, 8)
+                    except Exception:
+                        pass
                 def prepare(row):
                     try:
                         stamp = int(row['timestamp'])
