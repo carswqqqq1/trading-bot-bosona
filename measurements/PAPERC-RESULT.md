@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -323,3 +323,39 @@ The sample-end book for the hourly position was stale, so unrealized P/L and equ
 | Equity reached $78 | no |
 
 Latency in seconds from his fill to the paper action: 2.436.
+
+## Continued again from $50.46530948
+
+The book was not reset and no rule was changed. The run resumed at cash $50.46530948 with 20.19 Up shares of `bitcoin-up-or-down-september-30-2026-10pm-et` still open, cost $2.57204. [Log](paperc-fresh5-2026-10-01.jsonl).
+
+The hourly market still had no published resolution. A resolution requires Gamma `umaResolutionStatus` `resolved` and `closed` true. That market stayed open, so the paper position stayed open. Live outcome prices were not used as a payout.
+
+No position closed. Nine buys copied his exact share count at a full-size price at or below his price. No same-minute sell printed.
+
+| Buy | Shares | His price | Our price | Gross | Fee | Cash after | Latency (seconds) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Up `btc-updown-15m-1790823600` | 33 | 0.29 | 0.2312121212121212121212121212 | 7.630 | 0.41058 | 42.42472948 | 2.462 |
+| Up `btc-updown-5m-1790823900` | 90 | 0.32 | 0.3027622222222222222222222222 | 27.2486 | 1.32979 | 13.84633948 | 2.914 |
+| Up `btc-updown-5m-1790823900` | 5 | 0.32 | 0.3 | 1.50 | 0.07350 | 12.27283948 | 3.502 |
+| Up `btc-updown-5m-1790823900` | 10.15625 | 0.36 | 0.31 | 3.1484375 | 0.15207 | 8.97233198 | 2.612 |
+| Up `btc-updown-5m-1790823900` | 5 | 0.36 | 0.31 | 1.550 | 0.07487 | 7.34746198 | 1.444 |
+| Up `btc-updown-5m-1790823900` | 5 | 0.36 | 0.31 | 1.550 | 0.07487 | 5.72259198 | 1.637 |
+| Up `btc-updown-5m-1790823900` | 5 | 0.36 | 0.31 | 1.550 | 0.07487 | 4.09772198 | 1.833 |
+| Up `btc-updown-5m-1790823900` | 5 | 0.36 | 0.31 | 1.550 | 0.07487 | 2.47285198 | 2.054 |
+| Up `btc-updown-5m-1790823900` | 5 | 0.36 | 0.31 | 1.550 | 0.07487 | 0.84798198 | 2.246 |
+
+| Open position | Shares | Cost | Liquidation quote |
+| --- | ---: | ---: | ---: |
+| Up `bitcoin-up-or-down-september-30-2026-10pm-et` | 20.19 | 2.57204 | not quoted; stale book |
+| Up `btc-updown-15m-1790823600` | 33 | 8.04058 | 13.19847 |
+| Up `btc-updown-5m-1790823900` | 130.15625 | 41.5767475 | not quoted; stale book |
+
+| | USD |
+| --- | ---: |
+| Ending cash | 0.84798198 |
+| Realized P/L | 14.03734948 |
+| Unrealized P/L | not quoted |
+| Equity | not quoted |
+| Equity reached $78 | not marked; two books were stale |
+
+Latency in seconds from his fill to each paper action: 2.462, 2.914, 3.502, 2.438, 2.403, 2.612, 1.444, 1.637, 1.833, 2.054, 2.246, 2.447, 2.67, 2.87, 3.069, 3.262, 2.377, 2.218, 1.418, 2.4.
