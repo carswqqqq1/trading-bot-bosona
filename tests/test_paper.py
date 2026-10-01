@@ -353,6 +353,22 @@ class PaperJournalTests(unittest.TestCase):
         found = paper.fresh_trades([older, newer], lambda key: False, config(), NOW - 30)
         self.assertEqual([item[1]["transaction_hash"] for item in found], ["0xnew", "0xold"])
         self.assertEqual(paper.fresh_trades([older, newer], lambda key: key == found[0][0], config(), NOW - 30)[0][1]["transaction_hash"], "0xold")
+        kept = paper.fresh_trades([older, newer], lambda key: False, config(), NOW - 30, preserve_order=True)
+        self.assertEqual([item[1]["transaction_hash"] for item in kept], ["0xold", "0xnew"])
+
+    def test_stream_trade_row_keeps_only_his_fill(self):
+        payload = {
+            "proxyWallet": WALLET, "transactionHash": "0xhash", "conditionId": CONDITION,
+            "asset": TOKEN_UP, "timestamp": NOW - 1, "side": "BUY", "size": 5, "price": 0.5,
+            "slug": f"btc-updown-5m-{START}", "outcome": "Up",
+        }
+        mapped = paper.stream_trade_row(payload, WALLET)
+        self.assertEqual(mapped["side"], "BUY")
+        self.assertEqual(mapped["token_id"], TOKEN_UP)
+        self.assertEqual(mapped["slug"], payload["slug"])
+        self.assertEqual(mapped["timestamp"], NOW - 1)
+        self.assertIsNone(paper.stream_trade_row(dict(payload, proxyWallet="0x" + "b" * 40), WALLET))
+        self.assertEqual(paper.stream_trade_row(dict(payload, timestamp=(NOW - 1) * 1000), WALLET)["timestamp"], NOW - 1)
 
 
 if __name__ == "__main__":

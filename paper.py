@@ -16,16 +16,24 @@ stays under max_open_cost_usd, which is below the cash balance, so one burst
 cannot spend the whole account. These rules do not guarantee a profit.
 """
 import argparse
+import base64
+import http.client
 import json
 import math
+import os
+import queue
 import re
+import socket
 import sqlite3
+import ssl
+import struct
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_CEILING
 from pathlib import Path
-from urllib.parse import quote as urlquote
+from urllib.parse import quote as urlquote, urlencode, urlsplit
 
 from bot import activity, array, decimal as D, get_json, market_timeframe, row_keys, source_skip, validate
 
@@ -41,7 +49,7 @@ def ordered_stamp(row):
         return None
 
 
-def fresh_trades(rows, seen, config, observer_start):
+def fresh_trades(rows, seen, config, observer_start, preserve_order=False):
     """Unseen leader trades, newest fill first.
 
     Public activity arrives as a page. Deciding in this order means an older
@@ -61,7 +69,8 @@ def fresh_trades(rows, seen, config, observer_start):
         if stamp is None or stamp < observer_start:
             continue
         selected.append((stamp, key, row))
-    selected.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    if not preserve_order:
+        selected.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [(key, row) for _, key, row in selected]
 
 
@@ -91,6 +100,222 @@ def activity_pages_newest(wallet, start, end, fetch=get_json):
             raise ValueError('Missing or repeating activity cursor')
         cursors.add(cursor)
         params['cursor'] = cursor
+
+
+_HTTP = threading.local()
+
+
+def paper_get_json(base, params=None):
+    """GET JSON on a reused TLS connection. Paper reads only; no orders."""
+    parts = urlsplit(base)
+    if parts.scheme != 'https' or not parts.hostname:
+        return get_json(base, params)
+    path = parts.path or '/'
+    query = urlencode(params) if params else parts.query
+    if query:
+        path += '?' + query
+    last = None
+    for _ in range(2):
+        conn = _https_conn(parts.hostname)
+        try:
+            conn.request('GET', path, headers={
+                'User-Agent': 'btc-copy-paper-prototype/0.1',
+                'Connection': 'keep-alive',
+                'Accept': 'application/json',
+            })
+            response = conn.getresponse()
+            body = response.read()
+            if response.status != 200:
+                raise ValueError('http_%s' % response.status)
+            return json.loads(body)
+        except Exception as exc:
+            last = exc
+            _drop_https_conn(parts.hostname)
+    raise last
+
+
+def _https_conn(host):
+    conns = getattr(_HTTP, 'conns', None)
+    if conns is None:
+        conns = {}
+        _HTTP.conns = conns
+    conn = conns.get(host)
+    if conn is None:
+        conn = http.client.HTTPSConnection(host, timeout=4)
+        conns[host] = conn
+    return conn
+
+
+def _drop_https_conn(host):
+    conns = getattr(_HTTP, 'conns', None) or {}
+    conn = conns.pop(host, None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def stream_trade_row(payload, wallet):
+    """Map one public activity/trades payload into the paper row shape."""
+    if not isinstance(payload, dict):
+        return None
+    proxy = payload.get('proxyWallet') or payload.get('proxy_wallet')
+    if not isinstance(proxy, str) or proxy.lower() != wallet.lower():
+        return None
+    side = payload.get('side')
+    if side not in ('BUY', 'SELL'):
+        return None
+    try:
+        stamp = int(payload['timestamp'])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if stamp > 10**12:
+        stamp //= 1000
+    return dict(proxy_wallet=proxy, transaction_hash=payload.get('transactionHash') or payload.get('transaction_hash'),
+                condition_id=payload.get('conditionId') or payload.get('condition_id'),
+                token_id=payload.get('asset') or payload.get('token_id'),
+                timestamp=stamp, side=side, size=payload.get('size'), price=payload.get('price'),
+                usdc_size=payload.get('usdcSize', payload.get('usdc_size')), type='TRADE',
+                slug=payload.get('slug'), outcome=payload.get('outcome'), is_combo=False)
+
+
+class PublicTradeFeed:
+    """Push one leader's public trades as they arrive. Never sends an order."""
+
+    def __init__(self, wallet):
+        self.wallet = wallet
+        self.queue = queue.Queue()
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='paper-trade-feed', daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def close(self):
+        self.stop.set()
+
+    def _run(self):
+        while not self.stop.is_set():
+            try:
+                self._session()
+            except Exception as exc:
+                self.queue.put(('error', str(exc)))
+                self.stop.wait(1)
+
+    def _session(self):
+        host = 'ws-live-data.polymarket.com'
+        raw = socket.create_connection((host, 443), timeout=10)
+        try:
+            ssock = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+            key = base64.b64encode(os.urandom(16)).decode()
+            ssock.sendall((
+                'GET / HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                'Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n' % (host, key)
+            ).encode())
+            buf = b''
+            while b'\r\n\r\n' not in buf:
+                chunk = ssock.recv(4096)
+                if not chunk:
+                    raise ConnectionError('websocket_handshake_closed')
+                buf += chunk
+            head, buf = buf.split(b'\r\n\r\n', 1)
+            if b' 101 ' not in head.split(b'\r\n', 1)[0]:
+                raise ConnectionError('websocket_handshake_rejected')
+            self._send(ssock, 1, json.dumps({'action': 'subscribe', 'subscriptions': [
+                {'topic': 'activity', 'type': 'trades'}]}).encode())
+            ssock.settimeout(1)
+            last_ping = time.time()
+            fragments = []
+            while not self.stop.is_set():
+                if time.time() - last_ping >= 5:
+                    self._send(ssock, 1, b'PING')
+                    last_ping = time.time()
+                try:
+                    fin, opcode, payload, buf = self._read_frame(ssock, buf)
+                except socket.timeout:
+                    continue
+                if opcode == 8:
+                    raise ConnectionError('websocket_closed')
+                if opcode == 9:
+                    self._send(ssock, 10, payload)
+                    continue
+                if opcode != 1 and opcode != 0:
+                    continue
+                if opcode == 1:
+                    fragments = [payload]
+                else:
+                    fragments.append(payload)
+                if not fin:
+                    continue
+                payload = b''.join(fragments)
+                fragments = []
+                if not payload or payload == b'PONG':
+                    continue
+                try:
+                    msg = json.loads(payload)
+                except ValueError:
+                    continue
+                body = msg.get('payload') if isinstance(msg, dict) else None
+                row = stream_trade_row(body, self.wallet)
+                if row is not None:
+                    self.queue.put(('trade', time.time(), row))
+        finally:
+            try:
+                raw.close()
+            except Exception:
+                pass
+
+    def _send(self, ssock, opcode, payload):
+        mask = os.urandom(4)
+        n = len(payload)
+        header = bytearray([0x80 | opcode])
+        if n < 126:
+            header.append(0x80 | n)
+        elif n < 65536:
+            header.append(0x80 | 126)
+            header.extend(struct.pack('!H', n))
+        else:
+            header.append(0x80 | 127)
+            header.extend(struct.pack('!Q', n))
+        ssock.sendall(bytes(header) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+    def _read_frame(self, ssock, buf):
+        while len(buf) < 2:
+            buf += self._recv(ssock)
+        length = buf[1] & 0x7f
+        index = 2
+        if length == 126:
+            while len(buf) < 4:
+                buf += self._recv(ssock)
+            length = struct.unpack('!H', buf[2:4])[0]
+            index = 4
+        elif length == 127:
+            while len(buf) < 10:
+                buf += self._recv(ssock)
+            length = struct.unpack('!Q', buf[2:10])[0]
+            index = 10
+        if length > 1_000_000:
+            raise ConnectionError('websocket_frame_too_large')
+        fin = bool(buf[0] & 0x80)
+        masked = buf[1] & 0x80
+        if masked:
+            while len(buf) < index + 4:
+                buf += self._recv(ssock)
+            mask = buf[index:index+4]
+            index += 4
+        while len(buf) < index + length:
+            buf += self._recv(ssock)
+        payload = buf[index:index+length]
+        if masked:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        return fin, buf[0] & 0x0f, payload, buf[index+length:]
+
+    def _recv(self, ssock):
+        chunk = ssock.recv(65536)
+        if not chunk:
+            raise ConnectionError('socket_closed')
+        return chunk
 
 
 def fee_rate(market):
@@ -537,6 +762,10 @@ def main():
     if not math.isfinite(args.duration) or args.duration <= 0:
         parser.error('duration must be positive and finite')
     raw_config = json.loads(Path(args.config).read_text())
+    # Transport is not part of the stored strategy. Reusing a paper db must keep cash.
+    transport = str(raw_config.pop('signal_transport', 'poll'))
+    if transport not in ('poll', 'websocket'):
+        raise ValueError('signal_transport must be poll or websocket')
     interval = float(D(raw_config['poll_seconds']))
     if not math.isfinite(interval) or interval < 0.1:
         raise ValueError('paper poll_seconds must be finite and at least 0.1')
@@ -601,80 +830,129 @@ def main():
                   poll_seconds=config['poll_seconds'],activity_lookback_seconds=lookback,
                   copy_price_min=config.get('copy_price_min'),copy_price_max=config.get('copy_price_max'),
                   exit_window_seconds=config.get('exit_window_seconds'),
-                  latency_policy='Act on the newest fill in the first public page before older pages or older rows. Out-of-band buys are decided before a book fetch.'))
-        try:
-            while time.monotonic()-started < args.duration:
-                next_request = time.monotonic()+config['poll_seconds']
+                  signal_transport=transport,
+                  latency_policy=('Public trade stream. Decide when his fill frame arrives, before another poll. Out-of-band buys skip before the book fetch.'
+                                  if transport == 'websocket' else
+                                  'Act on the newest fill in the first public page before older pages or older rows. Out-of-band buys are decided before a book fetch.')))
+        def handle_rows(rows, preserve_order=False, received_at=None):
+            fresh = fresh_trades(rows, journal.contains, config, observer_start, preserve_order=preserve_order)
+            planned = []
+            for key, row in fresh:
+                stamp = int(row['timestamp'])
+                first = key not in observations
+                if first:
+                    seen_clock = received_at.get(id(row), time.time()) if received_at else time.time()
+                    observations[key] = {'delay':seen_clock-stamp,
+                                         'continuous_sample':stamp>=run_started_wall}
+                backlog = stamp < run_started_wall
+                reason = 'resume_backlog_not_copied' if backlog else source_skip(dict(row, side='BUY'), config, time.time())
+                if not reason:
+                    try:
+                        if outside_copy_band(row, config):
+                            reason = 'outside_copy_price_band'
+                    except (ValueError, KeyError, TypeError, ArithmeticError):
+                        reason = None
+                market_future = book_future = None
+                if not reason:
+                    # Start the public book read before logging, so the decision is not waiting on disk.
+                    market_future = pool.submit(paper_get_json, 'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'], safe=''))
+                    book_future = pool.submit(paper_get_json, 'https://clob.polymarket.com/book', {'token_id':row['token_id']})
+                if first:
+                    emit(dict(status='OBSERVED',event_id=key,side=row['side'],slug=row['slug'],
+                              outcome=row.get('outcome'),price=row.get('price'),
+                              source_transaction=row.get('transaction_hash'),
+                              source_timestamp_seconds=row['timestamp'],
+                              first_seen_at_utc=datetime.now(timezone.utc).isoformat(),
+                              source_to_first_seen_seconds=round(observations[key]['delay'],3),
+                              continuous_run_latency_sample=observations[key]['continuous_sample'],
+                              seen_before_run_start=not observations[key]['continuous_sample']))
+                planned.append((key, row, market_future, book_future, reason))
+            for key, row, market_future, book_future, reason in planned:
                 try:
-                    end = int(time.time())
-                    pages = activity_pages_newest(
-                        config['leader_wallet'], max(source_start, end-lookback), end)
-                    for page in pages:
-                        fresh = fresh_trades(page, journal.contains, config, observer_start)
-                        planned = []
-                        for key, row in fresh:
-                            stamp = int(row['timestamp'])
-                            first = key not in observations
-                            if first:
-                                observations[key] = {'delay':time.time()-stamp,
-                                                     'continuous_sample':stamp>=run_started_wall}
-                            backlog = stamp < run_started_wall
-                            reason = 'resume_backlog_not_copied' if backlog else source_skip(dict(row, side='BUY'), config, time.time())
-                            if not reason:
-                                try:
-                                    if outside_copy_band(row, config):
-                                        reason = 'outside_copy_price_band'
-                                except (ValueError, KeyError, TypeError, ArithmeticError):
-                                    reason = None
-                            market_future = book_future = None
-                            if not reason:
-                                # Start the public book read before logging, so the decision is not waiting on disk.
-                                market_future = pool.submit(get_json, 'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'], safe=''))
-                                book_future = pool.submit(get_json, 'https://clob.polymarket.com/book', {'token_id':row['token_id']})
-                            if first:
-                                emit(dict(status='OBSERVED',event_id=key,side=row['side'],slug=row['slug'],
-                                          outcome=row.get('outcome'),price=row.get('price'),
-                                          source_transaction=row.get('transaction_hash'),
-                                          source_timestamp_seconds=row['timestamp'],
-                                          first_seen_at_utc=datetime.now(timezone.utc).isoformat(),
-                                          source_to_first_seen_seconds=round(observations[key]['delay'],3),
-                                          continuous_run_latency_sample=observations[key]['continuous_sample'],
-                                          seen_before_run_start=not observations[key]['continuous_sample']))
-                            planned.append((key, row, market_future, book_future, reason))
-                        for key, row, market_future, book_future, reason in planned:
-                            try:
-                                if reason:
-                                    decision = journal.process(key, row, {}, {}, time.time(), skip_reason=reason)
-                                else:
-                                    decision = journal.process(key, row, market_future.result(), book_future.result(), time.time())
-                                note_decision(decision)
-                                emit(decision)
-                            except Exception as exc:
-                                emit(dict(status='ERROR',message=str(exc),event_id=key))
+                    if reason:
+                        decision = journal.process(key, row, {}, {}, time.time(), skip_reason=reason)
+                    else:
+                        decision = journal.process(key, row, market_future.result(), book_future.result(), time.time())
+                    note_decision(decision)
+                    emit(decision)
+                except Exception as exc:
+                    emit(dict(status='ERROR',message=str(exc),event_id=key))
+                    if not journal.contains(key):
+                        try:
+                            decision = journal.process(key, row, {}, {}, time.time(), skip_reason='book_unavailable')
+                            note_decision(decision)
+                            emit(decision)
+                        except Exception:
+                            pass
+        def check_exits():
+            for token, position in list(journal.holdings().items()):
+                if position['shares'] <= 0:
+                    continue
+                window = config.get('exit_window_seconds')
+                opened = position.get('entry_source_timestamp')
+                if window is not None and opened is not None and time.time()-int(opened) > float(window):
+                    continue
+                try:
+                    market_future=pool.submit(paper_get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
+                    book_future=pool.submit(paper_get_json,'https://clob.polymarket.com/book',{'token_id':token})
+                    exited=journal.realize_if_bid_above_cost(market_future.result(),book_future.result(),time.time())
+                    if exited:
+                        emit(exited)
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))
-                    next_request=max(next_request,time.monotonic()+2)
-                for token, position in list(journal.holdings().items()):
-                    if position['shares'] <= 0:
-                        continue
-                    window = config.get('exit_window_seconds')
-                    opened = position.get('entry_source_timestamp')
-                    if window is not None and opened is not None and time.time()-int(opened) > float(window):
-                        continue
+        feed = None
+        try:
+            if transport == 'websocket':
+                feed = PublicTradeFeed(config['leader_wallet'])
+                feed.start()
+                while time.monotonic()-started < args.duration:
                     try:
-                        market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
-                        book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
-                        exited=journal.realize_if_bid_above_cost(market_future.result(),book_future.result(),time.time())
-                        if exited:
-                            emit(exited)
+                        item = feed.queue.get(timeout=0.15)
+                    except queue.Empty:
+                        check_exits()
+                        close_windows()
+                        continue
+                    if item[0] == 'error':
+                        emit(dict(status='ERROR',message=item[1] if len(item) > 1 else 'trade_feed_error'))
+                        continue
+                    arrived = [item]
+                    while True:
+                        try:
+                            nxt = feed.queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if nxt[0] == 'trade':
+                            arrived.append(nxt)
+                    rows, clocks = [], {}
+                    for _, seen_at, row in arrived:
+                        clocks[id(row)] = seen_at
+                        rows.append(row)
+                    # Arrival order is the moment each fill appeared. Do not reorder it.
+                    handle_rows(rows, preserve_order=True, received_at=clocks)
+                    check_exits()
+                    close_windows()
+            else:
+                while time.monotonic()-started < args.duration:
+                    next_request = time.monotonic()+config['poll_seconds']
+                    try:
+                        end = int(time.time())
+                        pages = activity_pages_newest(
+                            config['leader_wallet'], max(source_start, end-lookback), end, fetch=paper_get_json)
+                        for page in pages:
+                            handle_rows(page)
                     except Exception as exc:
                         emit(dict(status='ERROR',message=str(exc)))
-                close_windows()
-                remaining=args.duration-(time.monotonic()-started)
-                if remaining > 0:
-                    time.sleep(min(max(0,next_request-time.monotonic()),remaining))
+                        next_request=max(next_request,time.monotonic()+2)
+                    check_exits()
+                    close_windows()
+                    remaining=args.duration-(time.monotonic()-started)
+                    if remaining > 0:
+                        time.sleep(min(max(0,next_request-time.monotonic()),remaining))
         except KeyboardInterrupt:
             pass
+        finally:
+            if feed is not None:
+                feed.close()
         close_windows()
         while closed_windows < planned_windows:
             closed_windows += 1

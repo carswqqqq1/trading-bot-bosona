@@ -16,5 +16,6 @@
   "max_book_age_seconds": 5,
   "copy_price_min": "0.40",
   "copy_price_max": "0.60",
-  "exit_window_seconds": 60
+  "exit_window_seconds": 60,
+  "signal_transport": "websocket"
 }
