@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), [the following log](paperc-fresh8-2026-10-01.jsonl), [the next log](paperc-fresh9-2026-10-01.jsonl), [the following log](paperc-fresh10-2026-10-01.jsonl), [the next log](paperc-fresh11-2026-10-01.jsonl), [the following log](paperc-fresh12-2026-10-01.jsonl), [the next log](paperc-fresh13-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), [the following log](paperc-fresh8-2026-10-01.jsonl), [the next log](paperc-fresh9-2026-10-01.jsonl), [the following log](paperc-fresh10-2026-10-01.jsonl), [the next log](paperc-fresh11-2026-10-01.jsonl), [the following log](paperc-fresh12-2026-10-01.jsonl), [the next log](paperc-fresh13-2026-10-01.jsonl), [the following log](paperc-fresh14-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -617,3 +617,21 @@ Nothing was left open.
 | Equity reached $78 | yes |
 
 Latency in seconds from his fill to each paper action: 2.437, 5.233, 1.565, 1.753, 1.965, 2.435. The resolution has no fill-to-action latency.
+
+## Continued from $96.67862356
+
+The book was not reset and no rule was changed. The run resumed at cash $96.67862356 with nothing open. Cumulative realized P/L was $57.67862356. Equity at resume was $96.67862356. [Log](paperc-fresh14-2026-10-01.jsonl).
+
+No position closed. No buy was copied. Windows 1 and 3 had no trade. Window 2 skipped his buy of 249 Up shares of `btc-updown-5m-1790829000` at 0.67 because the full-size book price was 0.7. Latency 1.408 seconds.
+
+Nothing was left open.
+
+| | USD |
+| --- | ---: |
+| Ending cash | 96.67862356 |
+| Realized P/L | 57.67862356 |
+| Unrealized P/L | 0 |
+| Equity | 96.67862356 |
+| Equity reached $78 | yes |
+
+Latency in seconds from his fill to the paper action: 1.408.

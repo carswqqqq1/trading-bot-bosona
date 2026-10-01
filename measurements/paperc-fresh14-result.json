@@ -1,0 +1,97 @@
+{
+  "name": "Paper C",
+  "paper_only": true,
+  "live_orders": false,
+  "private_keys_used": false,
+  "brez_used": false,
+  "leader_wallet": "0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed",
+  "leader_handle": "@bosona",
+  "starting_cash_usd": "39",
+  "ending_cash_usd": "96.67862356",
+  "realized_pnl_usd": "57.67862356",
+  "unrealized_pnl_usd": "0",
+  "equity_usd": "96.67862356",
+  "any_sell_copied": false,
+  "sells_copied": 0,
+  "decisions": 1,
+  "decision_latency_seconds": [
+    {
+      "window": 2,
+      "side": "BUY",
+      "slug": "btc-updown-5m-1790829000",
+      "action": "SKIP",
+      "reason": "latency_worse_than_leader_price",
+      "his_price": "0.67",
+      "our_price": "0.7",
+      "cent_gap": "3.00",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": "0",
+      "latency_seconds": 1.408
+    }
+  ],
+  "reset_to_39": false,
+  "rule_changed_this_run": false,
+  "rule_changed": null,
+  "rule_change_why": null,
+  "second_rule_changed": false,
+  "closes": [],
+  "book_was_steadily_losing": false,
+  "goal_usd": "78",
+  "goal_reached": true,
+  "poll_seconds": 0.05,
+  "latency_definition": "seconds from his fill timestamp to the paper copy or skip",
+  "filter": "Copy his exact share count, same side and market, only when the full size fills at his price or better. Skip that buy when the size is not on the book or costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. Copy a sell he prints only when it closes an existing paper position above paper cost. In the same minute a position opens, sell it when the bid is above paper cost without waiting for a sell he prints.",
+  "windows": [
+    {
+      "window": 1,
+      "trades": 0,
+      "note": "No trade in this window.",
+      "his_trades": [],
+      "cash_usd": "96.67862356",
+      "realized_pnl_usd": "57.67862356",
+      "unrealized_pnl_usd": "0"
+    },
+    {
+      "window": 2,
+      "trades": 1,
+      "note": null,
+      "his_trades": [
+        {
+          "window": 2,
+          "action": "SKIP",
+          "reason": "latency_worse_than_leader_price",
+          "his_trade": {
+            "side": "BUY",
+            "slug": "btc-updown-5m-1790829000",
+            "outcome": "Up",
+            "size": "249.0",
+            "price": "0.67",
+            "transaction": "0xe1a88601660a9730a39b5fe855dff18bdc47a93b61d6a42a443c522d6db66c12",
+            "timestamp": 1790829041
+          },
+          "his_price": "0.67",
+          "our_price": "0.7",
+          "cent_gap": "3.00",
+          "realized_pnl_usd": "0",
+          "unrealized_pnl_usd": "0",
+          "decision_latency_seconds": 1.408,
+          "copied_sell": false,
+          "rule_skipped": true,
+          "price_note": null
+        }
+      ],
+      "cash_usd": "96.67862356",
+      "realized_pnl_usd": "57.67862356",
+      "unrealized_pnl_usd": "0"
+    },
+    {
+      "window": 3,
+      "trades": 0,
+      "note": "No trade in this window.",
+      "his_trades": [],
+      "cash_usd": "96.67862356",
+      "realized_pnl_usd": "57.67862356",
+      "unrealized_pnl_usd": "0"
+    }
+  ]
+}
