@@ -449,45 +449,24 @@ class PaperJournal:
                         position['cost'] = ZERO
                     decision['realized_pnl_usd'] = str(net-removed_cost)
                 elif row['side']=='BUY' and self.config.get('strategy')=='paper_c' and self.config.get('copy_buys_at_or_better'):
-                    # His full size copies only when that size fills at his price
-                    # or better and the debit does not spend closed profit.
-                    # Closed profit may buy five shares, and only when those five
-                    # fill at his price or better. A full size whose price has
-                    # already walked uses that same five-share clip.
+                    # Five shares only. His full size was putting closed profit
+                    # into unmarked positions and leaving cash under the start.
+                    # The clip must fill at his price or at most one tick worse.
                     if source_shares < max(minimum, FIVE):
                         raise ValueError('below_market_minimum')
+                    if FIVE < minimum:
+                        raise ValueError('below_market_minimum')
                     try:
-                        full = quote(book,'BUY',source_shares,rate)
+                        chosen = quote(book,'BUY',FIVE,rate)
                     except ValueError:
                         raise ValueError('his_size_not_on_the_book')
-                    decision['simulated_vwap'] = str(full['vwap'])
-                    closed_profit = self.cash - D(self.config['starting_cash_usd'])
-                    spends_profit = closed_profit > 0 and full['gross'] > D(self.config['starting_cash_usd'])
-                    walked = full['vwap'] > source_price
-                    if not walked and not spends_profit:
-                        if full['gross'] > self.cash:
-                            raise ValueError('his_size_exceeds_cash')
-                        chosen, quantity = full, source_shares
-                        decision['copy_size'] = 'exact'
-                    else:
-                        if FIVE < minimum:
-                            raise ValueError('below_market_minimum')
-                        try:
-                            clip = quote(book,'BUY',FIVE,rate)
-                        except ValueError:
-                            if walked:
-                                raise ValueError('latency_worse_than_leader_price')
-                            raise ValueError('his_size_exceeds_cash' if spends_profit else 'his_size_not_on_the_book')
-                        decision['simulated_vwap'] = str(clip['vwap'])
-                        # His full size has usually walked. Five shares may pay
-                        # one tick more so the book still gets a copy. Anything
-                        # wider stays a skip.
-                        if clip['vwap'] > source_price + tick:
-                            raise ValueError('latency_worse_than_leader_price')
-                        if clip['gross'] > self.cash:
-                            raise ValueError('his_size_exceeds_cash')
-                        chosen, quantity = clip, FIVE
-                        decision['copy_size'] = 'five'
+                    decision['simulated_vwap'] = str(chosen['vwap'])
+                    if chosen['vwap'] > source_price + tick:
+                        raise ValueError('latency_worse_than_leader_price')
+                    if chosen['gross'] > self.cash:
+                        raise ValueError('his_size_exceeds_cash')
+                    quantity = FIVE
+                    decision['copy_size'] = 'five'
                     received = quantity - chosen['share_fee']
                     if received <= 0:
                         raise ValueError('taker_fee_consumed_the_shares')
@@ -657,20 +636,31 @@ class PaperJournal:
                     return None
                 cost_per = position['cost']/quantity
                 removed = position['cost']
-                reason = None
                 try:
-                    fill = quote(book,'SELL',quantity,rate,cost_per)
+                    at_or_above = quote(book,'SELL',quantity,rate,cost_per)
                 except ValueError:
-                    fill = None
-                if fill is None or fill['vwap'] <= cost_per:
-                    return None
-                net = fill['gross']-fill['fee']
-                if net <= removed:
-                    return None
-                reason = 'any_minute_bid_above_paper_cost'
-                latency_note = ('The bid was above paper cost. This sell does not wait for the '
-                                'opening minute or for a sell he prints. A bid at or below cost '
-                                'stays open so the spread is not locked in. Latency is his opening fill to this sell.')
+                    at_or_above = None
+                if at_or_above is not None and at_or_above['vwap'] > cost_per:
+                    fill = at_or_above
+                    net = fill['gross']-fill['fee']
+                    if net <= removed:
+                        return None
+                    reason = 'any_minute_bid_above_paper_cost'
+                    latency_note = ('The bid was above paper cost. This sell does not wait for the '
+                                    'opening minute or for a sell he prints. Latency is his opening fill to this sell.')
+                else:
+                    try:
+                        fill = quote(book,'SELL',quantity,rate)
+                    except ValueError:
+                        return None
+                    # One tick under cost is the spread. A wider drop is sold
+                    # so the position does not stay unmarked into a resolution.
+                    if fill['vwap'] > cost_per - D(book['tick_size']):
+                        return None
+                    net = fill['gross']-fill['fee']
+                    reason = 'any_minute_bid_no_longer_above_paper_cost'
+                    latency_note = ('The bid is more than one tick under paper cost, so the position '
+                                    'is sold instead of being held unmarked. Latency is his opening fill to this sell.')
                 cash = self.cash+net
                 position['shares'] = ZERO
                 position['cost'] = ZERO
