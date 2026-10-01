@@ -556,22 +556,43 @@ class PaperJournal:
                         position['cost'] = ZERO
                     decision['realized_pnl_usd'] = str(net-removed_cost)
                 elif row['side']=='BUY' and self.config.get('strategy')=='paper_c' and self.config.get('copy_buys_at_or_better'):
-                    # His exact share count. The price is the full-size book VWAP.
-                    # A better VWAP copies. A cap at his tick used to drop that
-                    # size and report the 5-share price instead. Cash that cannot
-                    # cover the full size skips the buy and does not scale it down.
-                    quantity = source_shares
-                    if quantity < max(minimum, FIVE):
+                    # His size when the book can fill it at his price or better.
+                    # If that full size is already worse, or it costs more than
+                    # the cash, copy the size still available at his price or
+                    # better that the cash can buy. Never pay above his price.
+                    # The minimum is 5 shares. The taker fee is taken in shares.
+                    if source_shares < max(minimum, FIVE):
                         raise ValueError('below_market_minimum')
+                    floor = max(minimum, FIVE)
                     try:
-                        fill = quote(book,'BUY',quantity,rate)
+                        full = quote(book,'BUY',source_shares,rate)
                     except ValueError:
-                        raise ValueError('his_size_not_on_the_book')
-                    decision['simulated_vwap'] = str(fill['vwap'])
-                    if fill['vwap'] > source_price:
-                        raise ValueError('latency_worse_than_leader_price')
-                    # The book must hold his full size. The taker fee is then
-                    # taken in shares, not as extra USDC and not as a rebate.
+                        full = None
+                    if full is not None:
+                        decision['simulated_vwap'] = str(full['vwap'])
+                    quantity = source_shares
+                    fill = full
+                    if fill is None or fill['vwap'] > source_price or fill['gross'] > self.cash:
+                        available = sum((level_size for _, level_size in levels(book,'BUY',source_price)), ZERO)
+                        quantity = min(source_shares, available).quantize(STEP, rounding=ROUND_DOWN)
+                        if source_price > 0:
+                            quantity = min(quantity, (self.cash/source_price).quantize(STEP, rounding=ROUND_DOWN))
+                        if quantity < floor:
+                            if full is not None and full['vwap'] > source_price:
+                                raise ValueError('latency_worse_than_leader_price')
+                            if full is None and available < floor:
+                                raise ValueError('his_size_not_on_the_book')
+                            raise ValueError('his_size_exceeds_cash')
+                        fill = quote(book,'BUY',quantity,rate,source_price)
+                        if fill['gross'] > self.cash:
+                            quantity = (quantity * self.cash / fill['gross']).quantize(STEP, rounding=ROUND_DOWN)
+                            if quantity < floor:
+                                raise ValueError('his_size_exceeds_cash')
+                            fill = quote(book,'BUY',quantity,rate,source_price)
+                        if fill['vwap'] > source_price or fill['gross'] > self.cash:
+                            raise ValueError('latency_worse_than_leader_price' if fill['vwap'] > source_price else 'his_size_exceeds_cash')
+                        decision['simulated_vwap'] = str(fill['vwap'])
+                        decision['size_note'] = 'Copied the shares available at his price or better that cash can buy.'
                     received = quantity - fill['share_fee']
                     if received <= 0:
                         raise ValueError('taker_fee_consumed_the_shares')
@@ -1099,7 +1120,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                 'The one rule change is to sell a paper position when the bid is above paper cost in the same minute it opened, without waiting for a sell he prints.')
                                if sample_reset else None if rule_reset is None else rule_reset['why'])
         buy_filter = ('copy his exact share count, same side and market, only when the full size fills at his price or better; '
-                      'skip when that size is not on the book or costs more than cash; '
+                      'if his full size is not available at his price or costs more than cash, copy the size that is, at least 5 shares; '
                       'a new buy pays the taker fee in shares and a new sell pays it from USDC proceeds; '
                       'copy a sell he prints only when it closes an existing paper position above paper cost')
         if config.get('sell_same_minute_if_bid_above_cost'):
@@ -1445,7 +1466,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     seconds_from_start_to_goal=goal_seconds,poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
                     filter=('Copy his exact share count, same side and market, only when the full size fills at his price or better. '
-                            'Skip that buy when the size is not on the book or costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. '
+                            'If his full size is not available at his price or costs more than the cash, copy the size that is, at least 5 shares. Do not pay above his price. '
                             'A new fill is a taker. The fee is shares times feeRate times price times one minus price, rounded to five decimals. '
                             'On a buy that fee is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee. '
                             'Copy a sell he prints only when it closes an existing paper position above paper cost. '
