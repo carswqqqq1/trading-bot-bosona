@@ -1219,6 +1219,11 @@ def run_paper_c(args, config, journal, observer_start, source_start):
             for key,row in row_keys(rows):
                 if journal.contains(key):
                     continue
+                try:
+                    if journal.contains(trade_identity(row)):
+                        continue
+                except (ArithmeticError, TypeError, ValueError, KeyError):
+                    pass
                 if (row.get('proxy_wallet','').lower()!=config['leader_wallet'].lower()
                     or row.get('type')!='TRADE' or row.get('is_combo') or row.get('side') not in ('BUY','SELL')
                     or market_timeframe(row.get('slug')) not in config['timeframes_minutes']
