@@ -3460,5 +3460,118 @@
         "unrealized_pnl_usd": "0.27626"
       }
     ]
+  },
+  "continued_from_50_46530948": {
+    "reset_this_run": false,
+    "rule_changed_this_run": false,
+    "log": "measurements/paperc-fresh4-2026-10-01.jsonl",
+    "result": "measurements/paperc-fresh4-result.json",
+    "resumed_cash_usd": "50.46530948",
+    "resumed_realized_pnl_usd": "14.03734948",
+    "resumed_unrealized_pnl_usd": "2.01577",
+    "resumed_equity_usd": "55.05311948",
+    "resumed_equity_reached_78": false,
+    "open_positions_at_resume": [
+      {
+        "slug": "bitcoin-up-or-down-september-30-2026-10pm-et",
+        "outcome": "Up",
+        "shares": "20.19",
+        "cost_usd": "2.57204"
+      }
+    ],
+    "resolution": {
+      "slug": "bitcoin-up-or-down-september-30-2026-10pm-et",
+      "published": false,
+      "note": "Gamma umaResolutionStatus was unset and closed was false through the sample, so the position stayed open. Live outcome prices were not used as a payout."
+    },
+    "ending_cash_usd": "50.46530948",
+    "realized_pnl_usd": "14.03734948",
+    "unrealized_pnl_usd": null,
+    "equity_usd": null,
+    "sample_end_quote": "stale_or_future_book",
+    "last_quotable_unrealized_pnl_usd": "-2.38413",
+    "last_quotable_equity_usd": "50.65321948",
+    "last_quotable_note": "End of window 2. The sample-end book was stale, so unrealized P/L and equity were left unset.",
+    "equity_reached_78": false,
+    "goal_reached": false,
+    "positions": [
+      {
+        "token_id": "55838345778034737667106672275628144144925499637506356117663781690085207867367",
+        "slug": "bitcoin-up-or-down-september-30-2026-10pm-et",
+        "outcome": "Up",
+        "shares": "20.19",
+        "cost_usd": "2.57204"
+      }
+    ],
+    "sells": 0,
+    "closes": [],
+    "decision_latency_seconds": [
+      {
+        "window": 3,
+        "side": "BUY",
+        "slug": "btc-updown-15m-1790823600",
+        "action": "SKIP",
+        "reason": "latency_worse_than_leader_price",
+        "his_price": "0.44",
+        "our_price": "0.458",
+        "cent_gap": "1.800",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 2.436
+      }
+    ],
+    "windows": [
+      {
+        "window": 1,
+        "trades": 0,
+        "note": "No trade in this window.",
+        "his_trades": [],
+        "cash_usd": "50.46530948",
+        "realized_pnl_usd": "14.03734948",
+        "unrealized_pnl_usd": "8.99818"
+      },
+      {
+        "window": 2,
+        "trades": 0,
+        "note": "No trade in this window.",
+        "his_trades": [],
+        "cash_usd": "50.46530948",
+        "realized_pnl_usd": "14.03734948",
+        "unrealized_pnl_usd": "-2.38413"
+      },
+      {
+        "window": 3,
+        "trades": 1,
+        "note": null,
+        "his_trades": [
+          {
+            "window": 3,
+            "action": "SKIP",
+            "reason": "latency_worse_than_leader_price",
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-15m-1790823600",
+              "outcome": "Down",
+              "size": "25.0",
+              "price": "0.44",
+              "transaction": "0xf110959823701e865c22d8a730c31142f15b2799d7aea9420d0f8b726b112a59",
+              "timestamp": 1790823665
+            },
+            "his_price": "0.44",
+            "our_price": "0.458",
+            "cent_gap": "1.800",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 2.436,
+            "copied_sell": false,
+            "rule_skipped": true,
+            "price_note": null
+          }
+        ],
+        "cash_usd": "50.46530948",
+        "realized_pnl_usd": "14.03734948",
+        "unrealized_pnl_usd": null
+      }
+    ]
   }
 }
