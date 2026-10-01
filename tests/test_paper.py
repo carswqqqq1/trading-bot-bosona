@@ -298,7 +298,7 @@ class PaperJournalTests(unittest.TestCase):
 
 def paper_c_config(**overrides):
     result = config(strategy="paper_c", starting_cash_usd="39", max_open_cost_usd="38",
-                    max_daily_proposed_usd="39")
+                    max_daily_proposed_usd="39", goal_usd="75")
     result.update(overrides)
     return result
 
@@ -469,41 +469,49 @@ class PaperCTests(unittest.TestCase):
         self.assertEqual(journal.holdings()[TOKEN_UP]["cost"], Decimal("5.00"))
         self.assertEqual(journal.cash, Decimal("34"))
 
-    def test_same_minute_bid_above_cost_sells_without_his_sell(self):
-        journal = self.journal(copy_buys_at_or_better=True, sell_same_minute_if_bid_above_cost=True)
+    def test_any_minute_bid_above_cost_sells_without_his_sell(self):
+        journal = self.journal(copy_buys_at_or_better=True, sell_any_minute_if_bid_above_cost=True)
         live = book(asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.60", "size": "100"}])
         bought = journal.process("buy-open", row(price="0.50", size="10", timestamp=NOW - 1), market(), live, NOW)
         self.assertEqual(bought["status"], "PAPER_BUY")
         self.assertEqual(Decimal(bought["shares"]), Decimal("9.4"))
         self.assertEqual(Decimal(bought["fee"]), Decimal("0.24000"))
-        sold = journal.realize_same_minute_if_bid_above_cost(market(), live, NOW)
+        sold = journal.realize_any_minute_if_bid_above_cost(market(), live, NOW)
         self.assertIsNotNone(sold)
         self.assertEqual(sold["status"], "PAPER_SELL")
-        self.assertEqual(sold["reason"], "same_minute_bid_above_paper_cost")
+        self.assertEqual(sold["reason"], "any_minute_bid_above_paper_cost")
         self.assertEqual(Decimal(sold["fee"]), Decimal("0.22560"))
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
         self.assertGreater(Decimal(sold["realized_pnl_usd"]), 0)
         self.assertEqual(sold["unrealized_pnl_usd"], "0")
-        self.assertEqual(sold["equity_reached_78"], False)
+        self.assertEqual(sold["goal_usd"], "75")
+        self.assertEqual(sold["equity_reached_goal"], False)
         self.assertEqual(sold["decision_latency_seconds"], 1)
         self.assertGreater(journal.cash, Decimal("39"))
-        again = journal.realize_same_minute_if_bid_above_cost(market(), live, NOW)
+        again = journal.realize_any_minute_if_bid_above_cost(market(), live, NOW)
         self.assertIsNone(again)
 
-    def test_a_later_minute_or_a_thin_bid_does_not_sell(self):
-        journal = self.journal(copy_buys_at_or_better=True, sell_same_minute_if_bid_above_cost=True)
+    def test_a_later_minute_sells_when_the_bid_is_above_paper_cost(self):
+        journal = self.journal(copy_buys_at_or_better=True, sell_any_minute_if_bid_above_cost=True)
         opened = book(asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.60", "size": "100"}])
         bought = journal.process("buy-open", row(price="0.50", size="10", timestamp=NOW - 1), market(), opened, NOW)
         self.assertEqual(bought["status"], "PAPER_BUY")
         thin = book(timestamp=NOW * 1000, asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.60", "size": "3"}])
-        self.assertIsNone(journal.realize_same_minute_if_bid_above_cost(market(), thin, NOW))
+        self.assertIsNone(journal.realize_any_minute_if_bid_above_cost(market(), thin, NOW))
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal(bought["shares"]))
-        later = book(timestamp=(NOW + 60) * 1000, asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.60", "size": "100"}])
-        self.assertIsNone(journal.realize_same_minute_if_bid_above_cost(market(), later, NOW + 60))
+        cheap = book(timestamp=(NOW + 60) * 1000, asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.41", "size": "100"}])
+        self.assertIsNone(journal.realize_any_minute_if_bid_above_cost(market(), cheap, NOW + 60))
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal(bought["shares"]))
+        later = book(timestamp=(NOW + 120) * 1000, asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.60", "size": "100"}])
+        sold = journal.realize_any_minute_if_bid_above_cost(market(), later, NOW + 120)
+        self.assertEqual(sold["status"], "PAPER_SELL")
+        self.assertEqual(sold["reason"], "any_minute_bid_above_paper_cost")
+        self.assertEqual(sold["decision_latency_seconds"], 121)
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+        self.assertGreater(Decimal(sold["realized_pnl_usd"]), 0)
         quiet = self.journal(copy_buys_at_or_better=True)
         quiet_buy = quiet.process("buy-quiet", row(price="0.50", size="10", timestamp=NOW - 1), market(), opened, NOW)
-        self.assertIsNone(quiet.realize_same_minute_if_bid_above_cost(market(), opened, NOW))
+        self.assertIsNone(quiet.realize_any_minute_if_bid_above_cost(market(), opened, NOW))
         self.assertEqual(quiet.holdings()[TOKEN_UP]["shares"], Decimal(quiet_buy["shares"]))
 
     def test_sell_without_a_position_stays_skipped_after_the_buy_rule(self):
@@ -592,8 +600,9 @@ class PaperCTests(unittest.TestCase):
         self.assertEqual(journal.cash, Decimal("35.94321"))
         self.assertEqual(sum((p["shares"] for p in journal.holdings().values()), Decimal(0)), 0)
         self.assertIsNone(by_outcome["Down"]["decision_latency_seconds"])
-        self.assertTrue(any(item.get("equity_reached_78") is False for item in closes))
-        self.assertFalse(any(item.get("equity_reached_78") is True for item in closes))
+        self.assertTrue(any(item.get("equity_reached_goal") is False for item in closes))
+        self.assertFalse(any(item.get("equity_reached_goal") is True for item in closes))
+        self.assertTrue(any(item.get("goal_usd") == "75" for item in closes))
         report = journal.portfolio(lambda url, params=None: resolved)
         self.assertEqual(Decimal(report["realized_pnl_usd"]), Decimal("-3.05679"))
         self.assertEqual(report["unrealized_pnl_at_liquidation_quote_usd"], "0")
@@ -634,6 +643,17 @@ class PaperCTests(unittest.TestCase):
         self.assertTrue(journal.config["sell_must_match_his_price"])
         with self.assertRaises(ValueError):
             journal.apply_one_rule_reset()
+
+    def test_live_paper_c_config_starts_at_37_40_and_sells_any_minute(self):
+        live = json.loads((Path(__file__).resolve().parent.parent / "config.paperc.json").read_text())
+        self.assertEqual(live["leader_wallet"], "0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed")
+        self.assertEqual(live["starting_cash_usd"], "37.40")
+        self.assertEqual(live["goal_usd"], "75")
+        self.assertTrue(live["copy_buys_at_or_better"])
+        self.assertTrue(live["sell_any_minute_if_bid_above_cost"])
+        self.assertNotIn("sell_same_minute_if_bid_above_cost", live)
+        self.assertLess(Decimal(live["max_open_cost_usd"]), Decimal(live["starting_cash_usd"]))
+        self.assertEqual(live["max_worse_than_leader"], "0")
 
 
 if __name__ == "__main__":

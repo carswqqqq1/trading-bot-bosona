@@ -8,13 +8,14 @@
   "max_signal_age_seconds": 20,
   "min_seconds_to_expiry": 5,
   "poll_seconds": 0.05,
-  "starting_cash_usd": "39",
+  "starting_cash_usd": "37.40",
   "max_worse_than_leader": "0",
   "max_buy_usd": "5.00",
-  "max_open_cost_usd": "38",
+  "max_open_cost_usd": "37.39",
   "max_outcome_cost_usd": "5.00",
   "max_book_age_seconds": 5,
   "strategy": "paper_c",
   "copy_buys_at_or_better": true,
-  "sell_same_minute_if_bid_above_cost": true
+  "sell_any_minute_if_bid_above_cost": true,
+  "goal_usd": "75"
 }
