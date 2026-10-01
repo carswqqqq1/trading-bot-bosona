@@ -22,17 +22,15 @@ more than the cash on hand, the buy is skipped and is not scaled down. The
 copy is a taker. On a new buy the fee is taken in shares, so the held count
 is his size minus fee divided by price. On a sell the fee comes out of the
 USDC proceeds. A resolution is not a fill and has no fee. Makers pay nothing.
-sell_same_minute_if_bid_above_cost sells a paper position when the bid is above
-paper cost in the minute it opened, without waiting for a sell he prints.
-skip_buy_unless_best_bid_sells_above_cost skips a new buy unless size at the
-live best bid can sell at least half the position strictly above its paper
-cost. His price or better and the 5-share minimum stay. A missing bid is not a
-fill. An ask worse than his price is not a copy. sell_same_minute_if_bid_above_cost
-now sells in any minute: first the size the bid can sell above paper cost, then
-whatever the best bid still shows once that bid is no longer above cost.
-Decision latency is his fill timestamp to that copy or skip. The clock is
-seconds from the book's start until cash reaches the goal. The paper48 path
-is unchanged.
+A copied buy is one of his printed trades: same side, same market, his exact
+share count, and only when that full size is on the book at his price or
+better. Under 5 shares, a missing size, or a cost above the cash is a skip.
+Nothing is scaled down and no fill is invented. Once that position is open,
+paper accounting sells the size posted at the best bid when that bid is no
+longer above paper cost. A bid that is still above cost is held. Every fill
+logs his transaction hash and the seconds from his fill to the decision.
+The clock is seconds from the book's start until cash reaches the goal.
+The paper48 path is unchanged.
 """
 import argparse
 import json
@@ -556,61 +554,25 @@ class PaperJournal:
                         position['cost'] = ZERO
                     decision['realized_pnl_usd'] = str(net-removed_cost)
                 elif row['side']=='BUY' and self.config.get('strategy')=='paper_c' and self.config.get('copy_buys_at_or_better'):
-                    # His size when the book can fill it at his price or better.
-                    # If that full size is already worse, or it costs more than
-                    # the cash, copy the size still available at his price or
-                    # better that the cash can buy. Never pay above his price.
-                    # The minimum is 5 shares. The taker fee is taken in shares.
-                    if source_shares < max(minimum, FIVE):
-                        raise ValueError('below_market_minimum')
-                    floor = max(minimum, FIVE)
-                    try:
-                        full = quote(book,'BUY',source_shares,rate)
-                    except ValueError:
-                        full = None
-                    if full is not None:
-                        decision['simulated_vwap'] = str(full['vwap'])
+                    # His printed size, same side and market. The book must hold
+                    # that full size at his price or better. A smaller size is
+                    # not a copy. Cash that cannot cover it skips the buy.
                     quantity = source_shares
-                    fill = full
-                    if fill is None or fill['vwap'] > source_price or fill['gross'] > self.cash:
-                        available = sum((level_size for _, level_size in levels(book,'BUY',source_price)), ZERO)
-                        quantity = min(source_shares, available).quantize(STEP, rounding=ROUND_DOWN)
-                        if source_price > 0:
-                            quantity = min(quantity, (self.cash/source_price).quantize(STEP, rounding=ROUND_DOWN))
-                        if quantity < floor:
-                            if full is not None and full['vwap'] > source_price:
-                                raise ValueError('latency_worse_than_leader_price')
-                            if full is None and available < floor:
-                                raise ValueError('his_size_not_on_the_book')
-                            raise ValueError('his_size_exceeds_cash')
-                        fill = quote(book,'BUY',quantity,rate,source_price)
-                        if fill['gross'] > self.cash:
-                            quantity = (quantity * self.cash / fill['gross']).quantize(STEP, rounding=ROUND_DOWN)
-                            if quantity < floor:
-                                raise ValueError('his_size_exceeds_cash')
-                            fill = quote(book,'BUY',quantity,rate,source_price)
-                        if fill['vwap'] > source_price or fill['gross'] > self.cash:
-                            raise ValueError('latency_worse_than_leader_price' if fill['vwap'] > source_price else 'his_size_exceeds_cash')
-                        decision['simulated_vwap'] = str(fill['vwap'])
-                        decision['size_note'] = 'Copied the shares available at his price or better that cash can buy.'
+                    if quantity < max(minimum, FIVE):
+                        raise ValueError('below_market_minimum')
+                    try:
+                        fill = quote(book,'BUY',quantity,rate)
+                    except ValueError:
+                        raise ValueError('his_size_not_on_the_book')
+                    decision['simulated_vwap'] = str(fill['vwap'])
+                    if fill['vwap'] > source_price:
+                        raise ValueError('latency_worse_than_leader_price')
                     received = quantity - fill['share_fee']
                     if received <= 0:
                         raise ValueError('taker_fee_consumed_the_shares')
                     debit = fill['gross']
                     if debit > self.cash:
                         raise ValueError('his_size_exceeds_cash')
-                    if self.config.get('skip_buy_unless_best_bid_sells_above_cost'):
-                        # The check is not a sell. No bid, or a top of book that
-                        # cannot sell at least half the position strictly above
-                        # paper cost, skips the buy. A worse bid is not a fill.
-                        block, info = best_bid_sell_block(
-                            book, position['shares']+received, position['cost']+debit, rate)
-                        decision['bid_gate'] = info
-                        decision['bid_gate_note'] = 'Best-bid check only. It is not a fill.'
-                        if block == 'no_bid':
-                            decision.pop('simulated_vwap', None)
-                        if block:
-                            raise ValueError(block)
                     cash = self.cash-debit
                     opening = position['shares'] == 0
                     position['shares'] += received
@@ -618,9 +580,11 @@ class PaperJournal:
                     fill = dict(fill, shares=received)
                     decision['fee_collected_in'] = 'shares'
                     decision['share_fee'] = str(fill['share_fee'])
+                    decision['leader_transaction_hash'] = row.get('transaction_hash')
                     if opening:
                         position['opened_at'] = now
                         position['opened_source_timestamp'] = row['timestamp']
+                        position['opened_transaction'] = row.get('transaction_hash')
                     exact_buy = True
                 elif row['side']=='BUY':
                     exposure = sum((p['cost'] for p in positions.values()),ZERO)
@@ -689,6 +653,9 @@ class PaperJournal:
                 decision['unrealized_pnl_usd'] = '0'
             if decision['status']=='SKIP' and 'realized_pnl_usd' not in decision:
                 decision['realized_pnl_usd'] = '0'
+            if decision.get('status') in ('PAPER_BUY','PAPER_SELL'):
+                decision['leader_transaction_hash'] = decision.get('leader_transaction_hash') or row.get('transaction_hash')
+                decision['decision_latency_seconds'] = latency
             position['row'] = row
             payload = json.dumps(position,default=str)
             self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',(token,payload))
@@ -754,11 +721,11 @@ class PaperJournal:
             return None
 
     def realize_same_minute_if_bid_above_cost(self, market, book, now):
-        """Sell paper shares in any minute. This is not one of his prints.
+        """Paper-account a sell once the best bid is no longer above cost.
 
-        First sell the size the book can fill strictly above paper cost.
-        Once the best bid is no longer above cost, sell the size posted at
-        that bid. Missing size is not invented, and a sub-minimum size is not sold.
+        This is not one of his prints. While the best bid is still above paper
+        cost the position is held. A missing bid is not a fill, and size that
+        is not posted at the best bid is not invented.
         """
         if not (self.config.get('strategy')=='paper_c' and self.config.get('sell_same_minute_if_bid_above_cost')):
             return None
@@ -779,39 +746,24 @@ class PaperJournal:
                 if minimum <= 0:
                     return None
                 cost_per = position['cost']/position['shares']
-                above = [(level_price, level_size) for level_price, level_size in levels(book, 'SELL')
-                         if level_price > cost_per]
-                available = sum((level_size for _, level_size in above), ZERO)
-                quantity = min(position['shares'], available).quantize(STEP, rounding=ROUND_DOWN)
-                reason = 'bid_above_paper_cost'
-                fill = None
-                if quantity >= minimum and quantity > 0:
-                    try:
-                        fill = quote(book, 'SELL', quantity, rate)
-                    except ValueError:
-                        fill = None
-                    if fill is not None:
-                        removed = position['cost'] * quantity / position['shares']
-                        net = fill['gross']-fill['fee']
-                        if fill['vwap'] <= cost_per or net <= removed:
-                            fill = None
-                if fill is None:
-                    bids = levels(book, 'SELL')
-                    if not bids:
-                        return None
-                    price = bids[0][0]
-                    size = sum((level_size for level_price, level_size in bids if level_price == price), ZERO)
-                    quantity = min(position['shares'], size).quantize(STEP, rounding=ROUND_DOWN)
-                    if quantity < minimum or quantity <= 0:
-                        return None
-                    only = {'bids': [{'price': str(price), 'size': str(size)}], 'asks': []}
-                    try:
-                        fill = quote(only, 'SELL', quantity, rate)
-                    except ValueError:
-                        return None
-                    removed = position['cost'] * quantity / position['shares']
-                    net = fill['gross']-fill['fee']
-                    reason = 'bid_no_longer_above_paper_cost'
+                bids = levels(book, 'SELL')
+                if not bids:
+                    return None
+                price = bids[0][0]
+                if price > cost_per:
+                    return None
+                size = sum((level_size for level_price, level_size in bids if level_price == price), ZERO)
+                quantity = min(position['shares'], size).quantize(STEP, rounding=ROUND_DOWN)
+                if quantity < minimum or quantity <= 0:
+                    return None
+                only = {'bids': [{'price': str(price), 'size': str(size)}], 'asks': []}
+                try:
+                    fill = quote(only, 'SELL', quantity, rate)
+                except ValueError:
+                    return None
+                removed = position['cost'] * quantity / position['shares']
+                net = fill['gross']-fill['fee']
+                reason = 'bid_no_longer_above_paper_cost'
                 cash = self.cash+net
                 position['shares'] -= quantity
                 position['cost'] -= removed
@@ -830,9 +782,13 @@ class PaperJournal:
                                 held_shares=str(position['shares']),
                                 cost_per_share_usd=str(cost_per),cost_usd=str(removed),
                                 source_timestamp_seconds=source_ts,decision_latency_seconds=latency,
-                                latency_note=('Sell in any minute. Above-cost size is sold first. '
-                                              'Once the best bid is no longer above paper cost, the size at that bid is sold. '
-                                              'This sell is not one of his prints. Latency is his opening fill to this sell.'))
+                                leader_transaction_hash=position.get('opened_transaction') or position['row'].get('transaction_hash'),
+                                source_transaction=position.get('opened_transaction') or position['row'].get('transaction_hash'),
+                                latency_note=('Held while the best bid is above paper cost. '
+                                              'Once that bid is no longer above cost, the size posted there is sold. '
+                                              'This sell is paper accounting, not one of his prints. '
+                                              'The hash is the printed buy that opened the position. '
+                                              'Latency is his opening fill to this sell.'))
                 self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
                                 (token,json.dumps(position,default=str)))
                 held_after = sum((p['shares'] for p in self.holdings().values()), ZERO)
@@ -1103,13 +1059,13 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         open_shares = sum((p['shares'] for p in journal.holdings().values()), ZERO)
         if bid_gate:
             sample_reset = False
-            rule_changed = 'skip_buy_unless_best_bid_sells_above_cost'
+            rule_changed = 'copy_his_exact_printed_size'
             rule_changed_this_run = True
-            rule_change_why = ('The whole-position bid gate copied no buys, and decision latency on those skips was slow. '
-                               'The buy now copies when the best bid can sell at least half the position strictly above paper cost. '
-                               'His price or better and the 5-share minimum stay. '
-                               'A position sells in any minute: first the size the bid can sell above paper cost, then the size at the best bid once that bid is no longer above cost. '
-                               'The goal is cash of $75. Starting cash stays $37.40. No live orders.')
+            rule_change_why = ('The bid gate copied no buys, so cash stayed at the start. '
+                               'A copy is now his exact printed share count, same side and market, only when that full size is on the book at his price or better. '
+                               'Under 5 shares, a missing size, or a cost above the cash is a skip. Nothing is scaled and no fill is invented. '
+                               'The position is held while the best bid is above paper cost, then the size posted at that bid is sold once the bid is no longer above cost. '
+                               'Every fill logs his transaction hash and decision latency. Starting cash stays $37.40. No live orders.')
         else:
             sample_reset = (bool(config.get('sell_same_minute_if_bid_above_cost'))
                             and journal.cash == D(config['starting_cash_usd']) and open_shares == 0)
@@ -1119,14 +1075,13 @@ def run_paper_c(args, config, journal, observer_start, source_start):
             rule_change_why = (('The previous book was steadily losing, so cash was reset to $39 and the open positions were dropped. '
                                 'The one rule change is to sell a paper position when the bid is above paper cost in the same minute it opened, without waiting for a sell he prints.')
                                if sample_reset else None if rule_reset is None else rule_reset['why'])
-        buy_filter = ('copy his exact share count, same side and market, only when the full size fills at his price or better; '
-                      'if his full size is not available at his price or costs more than cash, copy the size that is, at least 5 shares; '
+        buy_filter = ('copy his exact printed share count, same side and market, only when the full size is on the book at his price or better; '
+                      'skip when the size is under 5 shares, not on the book, or cash cannot cover it; '
+                      'never scale a fill and never pay a worse price; '
                       'a new buy pays the taker fee in shares and a new sell pays it from USDC proceeds; '
                       'copy a sell he prints only when it closes an existing paper position above paper cost')
         if config.get('sell_same_minute_if_bid_above_cost'):
-            buy_filter += '; sell in any minute the size the bid can sell above paper cost, then sell the best-bid size once that bid is no longer above cost'
-        if bid_gate:
-            buy_filter += '; skip a new buy unless the live best bid can sell at least half the position strictly above its paper cost'
+            buy_filter += '; hold while the best bid is above paper cost, then sell the size posted at that bid once it is no longer above cost'
         started_clock = book_started_at(journal, run_started_wall)
         emit(dict(status='STARTED',strategy='paper_c',paper=True,executed=False,live_orders=False,
                   leader_wallet=config['leader_wallet'],starting_cash_usd=str(D(config['starting_cash_usd'])),
@@ -1436,6 +1391,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     fill_decision_latency_seconds=[dict(status=d.get('status'), side=d.get('side'),
                                                         slug=d.get('slug'), fee_usd=d.get('fee'),
                                                         cash_usd=d.get('cash_usd'),
+                                                        leader_transaction_hash=d.get('leader_transaction_hash'),
                                                         decision_latency_seconds=d.get('decision_latency_seconds'))
                                                    for d in session_decisions
                                                    if d.get('status') in ('PAPER_BUY', 'PAPER_SELL')],
@@ -1470,17 +1426,15 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     goal_usd=str(goal),goal_reached=goal_reached,
                     seconds_from_start_to_goal=goal_seconds,poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
-                    filter=('Copy his exact share count, same side and market, only when the full size fills at his price or better. '
-                            'If his full size is not available at his price or costs more than the cash, copy the size that is, at least 5 shares. Do not pay above his price. '
+                    filter=('Copy his exact printed share count, same side and market, only when the full size is on the book at his price or better. '
+                            'Skip when the size is under 5 shares, not on the book, or cash cannot cover it. Never scale a fill and never pay a worse price. '
                             'A new fill is a taker. The fee is shares times feeRate times price times one minus price, rounded to five decimals. '
                             'On a buy that fee is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee. '
+                            'Every fill logs his transaction hash and decision latency. '
                             'Copy a sell he prints only when it closes an existing paper position above paper cost. '
-                            + ('Sell in any minute the size the bid can sell above paper cost, then sell the size at the best bid once that bid is no longer above cost. '
+                            + ('Hold while the best bid is above paper cost, then sell the size posted at that bid once it is no longer above cost. '
                                if config.get('sell_same_minute_if_bid_above_cost') else '')
-                            + ('Skip a new buy unless the live best bid can sell at least half the position strictly above its paper cost. '
-                               'Do not copy at a worse price. Do not invent a fill when there is no bid.'
-                               if bid_gate else '')
-                            if config.get('copy_buys_at_or_better') or bid_gate else
+                            if config.get('copy_buys_at_or_better') else
                             'Do not open new buys. Copy a sell only when it closes an existing paper position above paper cost. Skip when there is no matching paper position.'),
                     windows=[dict(window=window['window'],trades=window['trades'],note=window['note'],
                                   his_trades=window['decisions'],cash_usd=window['cash_usd'],
