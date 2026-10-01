@@ -4,6 +4,13 @@ No orders are submitted. Fees use Gamma feeSchedule and the documented formula
 https://docs.polymarket.com/trading/fees (verified 2026-09-30). No settlement.
 SELL fraction uses source holdings observed during this session only; earlier
 leader inventory is unknown and unmatched SELLs are refused.
+
+BUY copies keep his side and market, but only when the live book can buy the
+5-share minimum inside the per-buy budget, within max_price_drift of his fill,
+and without a spread that is already well through that fill. Open cost stays
+under max_open_cost_usd, which is below the cash balance, so one burst cannot
+spend the whole account. These checks reject bad entries. They do not guarantee
+a profit.
 """
 import argparse
 import json
@@ -64,6 +71,47 @@ def quote(book, side, quantity, rate, limit=None):
     if remaining:
         raise ValueError('insufficient_depth')
     return dict(shares=quantity, gross=gross, fee=fees, vwap=gross/quantity)
+
+
+FIVE = Decimal('5')
+
+
+def buy_entry(book, source_price, rate, tick, minimum, drift, budget, open_room, per_buy_room):
+    """Size a BUY at the 5-share minimum, or raise a rule name.
+
+    Uses only his fill, the current book, and the account budget. Passing the
+    checks does not guarantee a profit.
+    """
+    if budget <= 0:
+        if open_room <= 0 and per_buy_room > 0:
+            raise ValueError('open_risk_cap')
+        raise ValueError('five_shares_exceed_per_buy_budget')
+    asks = levels(book, 'BUY')
+    bids = levels(book, 'SELL')
+    if not asks:
+        raise ValueError('five_shares_outside_leader_price')
+    best_ask, best_bid = asks[0][0], (bids[0][0] if bids else None)
+    if best_ask > source_price + drift:
+        raise ValueError('price_chase_above_leader_fill')
+    # A bid already more than the drift below his fill means the spread itself
+    # would mark the paper buy well through his price.
+    if best_bid is None or best_bid < source_price - drift:
+        raise ValueError('spread_through_leader_price')
+    required = max(minimum, FIVE)
+    required = (required / STEP).to_integral_value(rounding=ROUND_CEILING) * STEP
+    limit = (min(Decimal('.9999'), source_price + drift) / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+    try:
+        preview = quote(book, 'BUY', required, rate, limit)
+    except ValueError:
+        raise ValueError('five_shares_outside_leader_price')
+    if preview['vwap'] > source_price + drift:
+        raise ValueError('fill_through_leader_price')
+    debit = preview['gross'] + preview['fee']
+    if debit > budget:
+        if open_room < per_buy_room and debit <= per_buy_room:
+            raise ValueError('open_risk_cap')
+        raise ValueError('five_shares_exceed_per_buy_budget')
+    return required, limit
 
 
 def buy_quantity(book, budget, rate, limit):
@@ -203,17 +251,12 @@ class PaperJournal:
                     pass
                 if row['side']=='BUY':
                     exposure = sum((p['cost'] for p in positions.values()),ZERO)
-                    budget = min(self.cash,D(self.config['max_buy_usd']),
-                                 D(self.config['max_open_cost_usd'])-exposure,
-                                 D(self.config['max_outcome_cost_usd'])-position['cost'])
-                    limit = (min(Decimal('.9999'),source_price+drift)/tick).to_integral_value(rounding=ROUND_DOWN)*tick
-                    target = min(budget,D(self.config.get('target_buy_usd',self.config['max_buy_usd'])))
-                    quantity = buy_quantity(book,max(ZERO,target),rate,limit)
-                    if quantity < minimum and budget > target:
-                        required = (minimum/STEP).to_integral_value(rounding=ROUND_CEILING)*STEP
-                        minimum_fill = quote(book,'BUY',required,rate,limit)
-                        if minimum_fill['gross']+minimum_fill['fee'] <= budget:
-                            quantity = required
+                    per_buy_room = min(self.cash,D(self.config['max_buy_usd']),
+                                       D(self.config['max_outcome_cost_usd'])-position['cost'])
+                    open_room = D(self.config['max_open_cost_usd'])-exposure
+                    budget = min(per_buy_room, open_room)
+                    quantity, limit = buy_entry(
+                        book, source_price, rate, tick, minimum, drift, budget, open_room, per_buy_room)
                 else:
                     if not leader_before or source_shares > leader_before:
                         raise ValueError('unmatched_source_sell_baseline_inventory_unknown')
@@ -245,6 +288,7 @@ class PaperJournal:
                                 fee_rate=str(rate),cash_usd=str(cash),held_shares=str(position['shares']))
             except (ValueError, KeyError, TypeError) as exc:
                 decision['reason'] = str(exc)
+            decision['rule_skipped'] = decision['status'] == 'SKIP'
             position['row'] = row
             payload = json.dumps(position,default=str)
             self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',(token,payload))
@@ -314,6 +358,8 @@ def main():
             raise ValueError(key+' must be positive')
     if 'target_buy_usd' in config and not 0 < D(config['target_buy_usd']) <= D(config['max_buy_usd']):
         raise ValueError('target_buy_usd must be positive and within max_buy_usd')
+    if D(config['max_open_cost_usd']) >= D(config['starting_cash_usd']):
+        raise ValueError('max_open_cost_usd must stay below starting cash')
     journal = PaperJournal(args.db,config)
     stored = journal.db.execute("SELECT value FROM meta WHERE key='observer_start'").fetchone()
     observer_start = int(stored[0]) if stored else int(time.time())
