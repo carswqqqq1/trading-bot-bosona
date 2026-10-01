@@ -1,6 +1,7 @@
 import contextlib
 import io
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -231,6 +232,179 @@ class WatcherTests(unittest.TestCase):
             self.assertGreater(spent, 0)
             self.assertLessEqual(spent, Decimal("50"))
             self.assertEqual(restarted.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 2)
+
+
+class FakeResponse:
+    def __init__(self, status, body, headers=None):
+        self.status = status
+        self._body = body if isinstance(body, bytes) else body.encode()
+        self._headers = headers or {}
+
+    def read(self):
+        return self._body
+
+    def getheaders(self):
+        return list(self._headers.items())
+
+
+class ScriptedConnection:
+    def __init__(self, host, script, calls):
+        self.host = host
+        self.script = script
+        self.calls = calls
+
+    def request(self, method, path, headers=None):
+        self.calls.append((self.host, path))
+        self._response = self.script.pop(0)
+
+    def getresponse(self):
+        return self._response
+
+    def close(self):
+        pass
+
+
+def scripted_client(script, clock):
+    calls = []
+    connections = []
+
+    def connect(host):
+        connection = ScriptedConnection(host, script, calls)
+        connections.append(connection)
+        return connection
+
+    client = bot.PublicClient(connect=connect, now=lambda: clock["t"])
+    return client, calls, connections
+
+
+class PublicClientTests(unittest.TestCase):
+    def test_429_backs_off_and_does_not_request_again_on_the_next_tick(self):
+        clock = {"t": 0.0}
+        script = [
+            FakeResponse(429, "{}", {"Retry-After": "0"}),
+            FakeResponse(200, '{"ok": true}'),
+        ]
+        client, calls, connections = scripted_client(script, clock)
+        with self.assertRaises(bot.RateLimited) as caught:
+            client.get_json("https://clob.polymarket.com/book?token_id=1")
+        self.assertEqual(caught.exception.host, "clob.polymarket.com")
+        self.assertEqual(len(calls), 1)
+        clock["t"] = 0.05
+        with self.assertRaises(bot.RateLimited):
+            client.get_json("https://clob.polymarket.com/book?token_id=1")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(connections), 1)
+        clock["t"] = 1.0
+        self.assertEqual(client.get_json("https://clob.polymarket.com/book?token_id=1"), {"ok": True})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(connections), 2)
+
+    def test_missing_retry_after_grows_and_a_success_clears_it(self):
+        clock = {"t": 0.0}
+        script = [
+            FakeResponse(429, "{}"),
+            FakeResponse(429, "{}"),
+            FakeResponse(200, '{"ok": true}'),
+            FakeResponse(200, '{"ok": true}'),
+        ]
+        client, calls, _ = scripted_client(script, clock)
+        with self.assertRaises(bot.RateLimited):
+            client.get_json("https://clob.polymarket.com/book?token_id=1")
+        clock["t"] = 1.0
+        with self.assertRaises(bot.RateLimited):
+            client.get_json("https://clob.polymarket.com/book?token_id=1")
+        clock["t"] = 2.0
+        with self.assertRaises(bot.RateLimited):
+            client.get_json("https://clob.polymarket.com/book?token_id=1")
+        self.assertEqual(len(calls), 2)
+        clock["t"] = 3.0
+        self.assertEqual(client.get_json("https://clob.polymarket.com/book?token_id=1"), {"ok": True})
+        self.assertEqual(len(calls), 3)
+        clock["t"] = 3.05
+        self.assertEqual(client.get_json("https://clob.polymarket.com/book?token_id=2"), {"ok": True})
+
+    def test_market_payloads_are_cached_and_books_are_not(self):
+        clock = {"t": 0.0}
+        script = [
+            FakeResponse(200, '{"slug": "one"}'),
+            FakeResponse(200, '{"slug": "two"}'),
+            FakeResponse(200, '{"bids": []}'),
+            FakeResponse(200, '{"bids": [{"price": "0.4", "size": "5"}]}'),
+        ]
+        client, calls, connections = scripted_client(script, clock)
+        market = "https://gamma-api.polymarket.com/markets/slug/btc-updown-5m-1"
+        self.assertEqual(client.get_json(market)["slug"], "one")
+        self.assertEqual(client.get_json(market)["slug"], "one")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(connections), 1)
+        clock["t"] = 15.0
+        self.assertEqual(client.get_json(market)["slug"], "two")
+        self.assertEqual(len(calls), 2)
+        book = "https://clob.polymarket.com/book?token_id=1"
+        self.assertEqual(client.get_json(book)["bids"], [])
+        self.assertEqual(client.get_json(book)["bids"][0]["price"], "0.4")
+        self.assertEqual(len(calls), 4)
+
+    def test_one_host_pool_is_shared_and_a_429_does_not_block_another_host(self):
+        clock = {"t": 0.0}
+        calls = []
+
+        def connect(host):
+            connection = ScriptedConnection(host, [], calls)
+            if host.startswith("clob"):
+                connection.script.append(FakeResponse(429, "{}", {"Retry-After": "10"}))
+            else:
+                connection.script.append(FakeResponse(200, '{"cached": false}'))
+                connection.script.append(FakeResponse(200, '{"cached": false}'))
+            return connection
+
+        client = bot.PublicClient(connect=connect, now=lambda: clock["t"])
+        self.assertEqual(client.get_json("https://gamma-api.polymarket.com/markets/slug/abc"), {"cached": False})
+        with self.assertRaises(bot.RateLimited):
+            client.get_json("https://clob.polymarket.com/book?token_id=1")
+        self.assertEqual(client.get_json("https://gamma-api.polymarket.com/markets?limit=1"), {"cached": False})
+        with self.assertRaises(bot.RateLimited):
+            client.get_json("https://clob.polymarket.com/book?token_id=2")
+        hosts = [host for host, _ in calls]
+        self.assertEqual(hosts.count("clob.polymarket.com"), 1)
+        self.assertEqual(hosts.count("gamma-api.polymarket.com"), 2)
+
+    def test_concurrent_pollers_share_one_request(self):
+        calls = []
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowConnection:
+            def request(self, method, path, headers=None):
+                calls.append(path)
+                started.set()
+                release.wait(2)
+
+            def getresponse(self):
+                return FakeResponse(200, '{"shared": true}')
+
+            def close(self):
+                pass
+
+        client = bot.PublicClient(connect=lambda host: SlowConnection(), now=lambda: 0.0)
+        results = []
+
+        def pull():
+            results.append(client.get_json("https://clob.polymarket.com/book?token_id=9"))
+
+        first = threading.Thread(target=pull)
+        first.start()
+        self.assertTrue(started.wait(2))
+        second = threading.Thread(target=pull)
+        second.start()
+        # The second poller joins the in-flight GET instead of sending its own.
+        second.join(0.05)
+        self.assertTrue(second.is_alive())
+        self.assertEqual(len(calls), 1)
+        release.set()
+        first.join(2)
+        second.join(2)
+        self.assertEqual(results, [{"shared": True}, {"shared": True}])
 
 
 if __name__ == "__main__":
