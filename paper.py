@@ -807,7 +807,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                   unrealized_pnl_usd=window['unrealized_pnl_usd'])
                              for window in windows])
         Path(args.result).write_text(json.dumps(result,indent=2)+'\n')
-        print(json.dumps(dict(status='RESULT_WRITTEN',path=args.result),flush=True))
+        print(json.dumps(dict(status='RESULT_WRITTEN',path=args.result)),flush=True)
 
 
 def main():
