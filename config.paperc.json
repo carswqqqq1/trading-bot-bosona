@@ -7,7 +7,7 @@
   "max_price_drift": "0.02",
   "max_signal_age_seconds": 20,
   "min_seconds_to_expiry": 5,
-  "poll_seconds": 0.05,
+  "poll_seconds": 0,
   "starting_cash_usd": "37.40",
   "max_worse_than_leader": "0",
   "max_buy_usd": "5.00",

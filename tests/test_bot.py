@@ -233,5 +233,53 @@ class WatcherTests(unittest.TestCase):
             self.assertEqual(restarted.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 2)
 
 
+class SharedClientTests(unittest.TestCase):
+    def test_429_backs_off_and_does_not_hit_the_host_again(self):
+        client = bot.PolymarketClient()
+        calls = []
+
+        def exchange(host, path):
+            calls.append((host, path))
+            return 429, {"Retry-After": "5"}, b""
+
+        client._exchange = exchange
+        with self.assertRaises(bot.RateLimited) as caught:
+            client.get_json("https://data-api.polymarket.com/v2/activity", {"user": "0xabc"})
+        self.assertGreaterEqual(caught.exception.retry_after, 5)
+        self.assertGreaterEqual(bot.retry_after_seconds(caught.exception, 0), 5)
+        with self.assertRaises(bot.RateLimited):
+            client.get_json("https://data-api.polymarket.com/v2/activity", {"user": "0xabc"})
+        self.assertEqual(len(calls), 1)
+        self.assertGreater(client.seconds_until_allowed("data-api.polymarket.com"), 0)
+
+    def test_gamma_market_reads_share_one_cached_response(self):
+        client = bot.PolymarketClient()
+        calls = []
+
+        def exchange(host, path):
+            calls.append(path)
+            return 200, {}, b'{"slug":"btc"}'
+
+        client._exchange = exchange
+        first = client.get_json("https://gamma-api.polymarket.com/markets/slug/btc")
+        second = client.get_json("https://gamma-api.polymarket.com/markets/slug/btc")
+        self.assertEqual(first["slug"], "btc")
+        self.assertEqual(second, first)
+        self.assertEqual(calls, ["/markets/slug/btc"])
+
+    def test_order_book_is_not_reused_from_the_market_cache(self):
+        client = bot.PolymarketClient()
+        calls = []
+
+        def exchange(host, path):
+            calls.append(path)
+            return 200, {}, b'{"asks":[]}'
+
+        client._exchange = exchange
+        client.get_json("https://clob.polymarket.com/book", {"token_id": "1"})
+        client.get_json("https://clob.polymarket.com/book", {"token_id": "1"})
+        self.assertEqual(len(calls), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,11 +4,13 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
+from http.client import HTTPSConnection
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -50,11 +52,225 @@ def validate(config):
     return config
 
 
+class RateLimited(Exception):
+    """The host returned 429. retry_after is how long callers must wait."""
+
+    def __init__(self, host, retry_after):
+        self.host = host
+        self.retry_after = float(retry_after)
+        super().__init__("http_429 " + host + " retry_after " + str(self.retry_after))
+
+
+def retry_after_seconds(exc, default=0.5):
+    """Seconds to wait before another request. A 429 never falls through as a zero wait."""
+    value = getattr(exc, "retry_after", None)
+    if value is None:
+        if "429" not in str(exc):
+            return default
+        return max(default, 2)
+    return max(0.0, float(value))
+
+
+def _parse_retry_after(headers):
+    raw = None if not headers else headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        return max(0.5, float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+class PolymarketClient:
+    """One shared TLS pool, one in-flight GET per URL, and a host-wide 429 pause.
+
+    Gamma market payloads are reused for 15 seconds. A 429 is not tried again
+    until that pause ends, including by another poller of the same host.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._idle = {}
+        self._gates = {}
+        self._until = {}
+        self._penalty = {}
+        self._cache = {}
+        self._inflight = {}
+
+    def seconds_until_allowed(self, host):
+        with self._lock:
+            return max(0.0, self._until.get(host, 0) - time.monotonic())
+
+    def get_json(self, base, params=None):
+        parts = urlsplit(base)
+        if parts.scheme != "https" or not parts.hostname:
+            url = base + ("?" + urlencode(params) if params else "")
+            request = Request(url, headers={"User-Agent": "btc-copy-paper-prototype/0.1"})
+            with urlopen(request, timeout=5) as response:
+                return json.load(response)
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        if params:
+            path += ("&" if "?" in path else "?") + urlencode(params)
+        host = parts.hostname
+        key = host + " " + path
+        cached = self._read_cache(key)
+        if cached is not None:
+            return cached
+        self._raise_if_blocked(host)
+        leader, slot = self._claim(key)
+        if not leader:
+            return self._wait(slot)
+        try:
+            try:
+                status, headers, body = self._exchange(host, path)
+            except RateLimited:
+                raise
+            except Exception:
+                status, headers, body = self._exchange(host, path)
+            if status == 429:
+                raise RateLimited(host, self._penalize(host, headers))
+            if status != 200:
+                raise ValueError("http_" + str(status))
+            payload = json.loads(body)
+            self._store_cache(key, host, path, payload)
+            self._reward(host)
+            slot["result"] = payload
+            return payload
+        except Exception as exc:
+            slot["error"] = exc
+            raise
+        finally:
+            slot["event"].set()
+            self._release(key, slot)
+
+    def _raise_if_blocked(self, host):
+        remaining = self.seconds_until_allowed(host)
+        if remaining > 0:
+            raise RateLimited(host, remaining)
+
+    def _penalize(self, host, headers):
+        parsed = _parse_retry_after(headers)
+        with self._lock:
+            floor = self._penalty.get(host, 2)
+            delay = floor if parsed is None else max(parsed, floor)
+            delay = min(60.0, delay)
+            self._penalty[host] = min(60.0, max(2.0, delay * 2))
+            self._until[host] = time.monotonic() + delay
+            return delay
+
+    def _reward(self, host):
+        with self._lock:
+            self._penalty[host] = 2
+
+    def _market_ttl(self, host, path):
+        if host == "gamma-api.polymarket.com" and "/markets/" in path:
+            return 15
+        return 0
+
+    def _read_cache(self, key):
+        with self._lock:
+            found = self._cache.get(key)
+            if not found:
+                return None
+            stored, payload = found
+            if time.monotonic() - stored > 15:
+                del self._cache[key]
+                return None
+            return payload
+
+    def _store_cache(self, key, host, path, payload):
+        if self._market_ttl(host, path) <= 0:
+            return
+        with self._lock:
+            self._cache[key] = (time.monotonic(), payload)
+
+    def _claim(self, key):
+        with self._lock:
+            slot = self._inflight.get(key)
+            if slot is not None:
+                return False, slot
+            slot = {"event": threading.Event(), "result": None, "error": None}
+            self._inflight[key] = slot
+            return True, slot
+
+    def _release(self, key, slot):
+        with self._lock:
+            if self._inflight.get(key) is slot:
+                del self._inflight[key]
+
+    def _wait(self, slot):
+        if not slot["event"].wait(8):
+            raise TimeoutError("shared request timed out")
+        if slot["error"] is not None:
+            raise slot["error"]
+        return slot["result"]
+
+    def _gate(self, host):
+        with self._lock:
+            gate = self._gates.get(host)
+            if gate is None:
+                gate = threading.Semaphore(2)
+                self._gates[host] = gate
+            return gate
+
+    def _borrow(self, host):
+        with self._lock:
+            pool = self._idle.get(host)
+            if pool:
+                return pool.pop()
+        return HTTPSConnection(host, timeout=5)
+
+    def _recycle(self, host, conn, broken):
+        if broken:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return
+        with self._lock:
+            pool = self._idle.setdefault(host, [])
+            if len(pool) < 2:
+                pool.append(conn)
+            else:
+                conn.close()
+
+    def _exchange(self, host, path):
+        gate = self._gate(host)
+        gate.acquire()
+        conn = self._borrow(host)
+        broken = True
+        try:
+            conn.request("GET", path, headers={
+                "User-Agent": "btc-copy-paper-prototype/0.1",
+                "Accept": "application/json",
+                "Connection": "keep-alive",
+            })
+            response = conn.getresponse()
+            body = response.read()
+            status = response.status
+            headers = {"Retry-After": response.getheader("Retry-After")}
+            broken = status >= 500
+            return status, headers, body
+        except Exception:
+            broken = True
+            raise
+        finally:
+            self._recycle(host, conn, broken)
+            gate.release()
+
+
+polymarket = PolymarketClient()
+
+
+def seconds_until_allowed(host):
+    return polymarket.seconds_until_allowed(host)
+
+
 def get_json(base, params=None):
-    url = base + ("?" + urlencode(params) if params else "")
-    request = Request(url, headers={"User-Agent": "btc-copy-paper-prototype/0.1"})
-    with urlopen(request, timeout=10) as response:
-        return json.load(response)
+    """GET JSON through the shared pool. A 429 pauses that host for every caller."""
+    return polymarket.get_json(base, params)
 
 
 def activity(wallet, start, end, fetch=get_json):
@@ -302,9 +518,13 @@ def main():
                 raise
             failures += 1
             print(json.dumps({"status": "ERROR", "message": str(exc)}), flush=True)
+            pause = max(retry_after_seconds(exc, 0),
+                        min(60, config["poll_seconds"] * (2 ** min(failures, 5))))
+        else:
+            pause = config["poll_seconds"]
         if args.once:
             break
-        time.sleep(min(60, config["poll_seconds"] * (2 ** min(failures, 5))))
+        time.sleep(pause)
 
 
 if __name__ == "__main__":
