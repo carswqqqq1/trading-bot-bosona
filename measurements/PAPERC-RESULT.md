@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -359,3 +359,29 @@ No position closed. Nine buys copied his exact share count at a full-size price 
 | Equity reached $78 | not marked; two books were stale |
 
 Latency in seconds from his fill to each paper action: 2.462, 2.914, 3.502, 2.438, 2.403, 2.612, 1.444, 1.637, 1.833, 2.054, 2.246, 2.447, 2.67, 2.87, 3.069, 3.262, 2.377, 2.218, 1.418, 2.4.
+
+## Continued from $0.84798198
+
+The book was not reset and no rule was changed. The run resumed at cash $0.84798198 with the three open positions still on, at the stored costs. [Log](paperc-fresh6-2026-10-01.jsonl).
+
+Each close used the published Gamma `outcomePrices` after `umaResolutionStatus` was `resolved` and the market was closed. The stored cost was the cost already on the book.
+
+| Close | Shares | Public price | Proceeds | Cost | Realized | Cash after | Unrealized | Equity | Equity reached $78 | Latency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| Up `bitcoin-up-or-down-september-30-2026-10pm-et` | 20.19 | 0 | 0.00 | 2.57204 | -2.57204 | 0.84798198 | unset; two positions still open | unset | unset on this close | none |
+| Up `btc-updown-5m-1790823900` | 130.15625 | 1 | 130.15625 | 41.5767475 | 88.5795025 | 131.00423198 | unset; the 15-minute position still open | unset | unset on this close | none |
+| Up `btc-updown-15m-1790823600` | 33 | 0 | 0.0 | 8.04058 | -8.04058 | 131.00423198 | 0 | 131.00423198 | yes | none |
+
+The first market published `["0", "1"]` for `["Up", "Down"]`. The 5-minute market published `["1", "0"]`. The 15-minute market published `["0", "1"]`. A public resolution is not one of his fills.
+
+No buy was copied. Window 2 had no trade. Window 3 skipped ten of his buys because the full-size book was above his price or his size was under 5 shares. No same-minute sell printed. Nothing was left open.
+
+| | USD |
+| --- | ---: |
+| Ending cash | 131.00423198 |
+| Realized P/L | 92.00423198 |
+| Unrealized P/L | 0 |
+| Equity | 131.00423198 |
+| Equity reached $78 | yes |
+
+Latency in seconds from his fill to each paper action: 2.423, 2.635, 2.854, 1.522, 1.717, 1.919, 2.134, 1.568, 1.802, 2.029. The three resolutions have no fill-to-action latency.
