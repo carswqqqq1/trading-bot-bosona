@@ -635,3 +635,27 @@ Nothing was left open.
 | Equity reached $78 | yes |
 
 Latency in seconds from his fill to the paper action: 1.408.
+
+## Fresh $37.40, only btc-updown-5m
+
+New book. Starting cash $37.40. The paper goal is $75. The one rule change is to copy only a market whose slug contains `btc-updown-5m`. Exact size, his price or better, the same-minute sell above paper cost, the 5-share minimum, and the 0.07 crypto taker fee stay. A worse price was not copied. No live order. [Log](paperc-5m-2026-10-01.jsonl). [Result](paperc-5m-result.json).
+
+Three 120-second windows. No buy was copied. Three buys were skipped because the full-size book was worse than his price.
+
+| Action | Slug | His price | Our price | Latency (seconds) |
+| --- | --- | ---: | ---: | ---: |
+| SKIP, worse than his price | `btc-updown-5m-1790868600` | 0.97 | 0.99 | 2.522 |
+| SKIP, worse than his price | `btc-updown-5m-1790868900` | 0.5300000232 | 0.54 | 1.435 |
+| SKIP, worse than his price | `btc-updown-5m-1790868900` | 0.5300000056 | 0.5976500000282 | 1.541 |
+
+| | USD |
+| --- | ---: |
+| Starting cash | 37.40 |
+| Ending cash | 37.40 |
+| Realized P/L | 0 |
+| Fees | 0 |
+| Copies | 0 |
+| Skips | 3 |
+| Equity | 37.40 |
+| Goal | 75 |
+| Goal reached | no |

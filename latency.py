@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bot import activity, row_keys, market_timeframe, validate
+from bot import RateLimited, activity, row_keys, market_timeframe, validate
 
 
 def observe(rows, seen, config, received_at, request_seconds):
@@ -99,6 +99,10 @@ def main():
                 try:
                     end = int(time.time())
                     rows = activity(config["leader_wallet"], max(source_start, end - 120), end)
+                except RateLimited as exc:
+                    emit({"status": "ERROR", "message": str(exc), "retry_after_seconds": exc.retry_after})
+                    next_poll = time.monotonic() + exc.retry_after
+                    continue
                 except Exception as exc:
                     emit({"status": "ERROR", "message": str(exc)})
                     next_poll = time.monotonic() + max(2, config["poll_seconds"])
