@@ -1,0 +1,104 @@
+{
+  "name": "Paper C",
+  "paper_only": true,
+  "live_orders": false,
+  "private_keys_used": false,
+  "brez_used": false,
+  "leader_wallet": "0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed",
+  "leader_handle": "@bosona",
+  "starting_cash_usd": "37.40",
+  "ending_cash_usd": "37.40",
+  "realized_pnl_usd": "0",
+  "fees_usd": "0",
+  "copies": 0,
+  "buys_copied": 0,
+  "sells_copied": 0,
+  "skips": 1,
+  "skip_reasons": [
+    "latency_worse_than_leader_price"
+  ],
+  "unrealized_pnl_usd": "0",
+  "equity_usd": "37.40",
+  "any_sell_copied": false,
+  "decisions": 1,
+  "decision_latency_seconds": [
+    {
+      "window": 1,
+      "side": "BUY",
+      "slug": "bitcoin-up-or-down-october-1-2026-11am-et",
+      "action": "SKIP",
+      "reason": "latency_worse_than_leader_price",
+      "his_price": "0.14",
+      "our_price": "0.16",
+      "cent_gap": "2.00",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": "0",
+      "fee_usd": null,
+      "fee_collected_in": null,
+      "share_fee": null,
+      "latency_seconds": 1.69
+    }
+  ],
+  "reset_to_starting_cash": true,
+  "rule_changed_this_run": true,
+  "rule_changed": "one_buy_at_most_half_of_current_cash_and_never_more_than_his_size",
+  "rule_change_why": "Starting cash is $37.40. The one rule change is that one buy cannot spend more than half of current cash, and never more than his size. His exact share count is copied, same side and market, only at his price or better. If that exact size costs more than half of current cash, the buy is skipped and is not scaled down. The same-minute sell above paper cost, the 5-share minimum, and the 0.07 crypto taker fee stay. The paper goal is $75. No live order is placed.",
+  "second_rule_changed": false,
+  "closes": [],
+  "book_was_steadily_losing": false,
+  "goal_usd": "75",
+  "goal_reached": false,
+  "poll_seconds": 0.0,
+  "decision_latency_min_seconds": 1.69,
+  "decision_latency_median_seconds": 1.69,
+  "decision_latency_max_seconds": 1.69,
+  "latency_definition": "seconds from his fill timestamp to the paper copy or skip",
+  "filter": "Copy his exact share count, same side and market, only at his price or better. One buy cannot spend more than half of current cash. If his exact size costs more, the buy is skipped and is not scaled down. Never more than his size. A worse price is not copied. The market minimum is 5 shares. Crypto taker fee is 0.07. The fee is shares times feeRate times price times one minus price, rounded to five decimals. On a buy that fee is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee. Copy a sell he prints only when the bid is at his price or better and the close nets a gain above paper cost. In the same minute a position opens, sell it when the bid is above paper cost without waiting for a sell he prints.",
+  "windows": [
+    {
+      "window": 1,
+      "trades": 1,
+      "note": null,
+      "his_trades": [
+        {
+          "window": 1,
+          "action": "SKIP",
+          "reason": "latency_worse_than_leader_price",
+          "his_trade": {
+            "side": "BUY",
+            "slug": "bitcoin-up-or-down-october-1-2026-11am-et",
+            "outcome": "Up",
+            "size": "50.0",
+            "price": "0.14",
+            "transaction": "0xe4d0d5361b731c68dd63f0fa51b0f3eb95209f32cb0ffe27bee78b11b078d333",
+            "timestamp": 1790869482
+          },
+          "his_price": "0.14",
+          "our_price": "0.16",
+          "cent_gap": "2.00",
+          "realized_pnl_usd": "0",
+          "unrealized_pnl_usd": "0",
+          "decision_latency_seconds": 1.69,
+          "fee_usd": null,
+          "fee_collected_in": null,
+          "share_fee": null,
+          "copied_sell": false,
+          "rule_skipped": true,
+          "price_note": null
+        }
+      ],
+      "cash_usd": "37.40",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": "0"
+    },
+    {
+      "window": 2,
+      "trades": 0,
+      "note": "No trade in this window.",
+      "his_trades": [],
+      "cash_usd": "37.40",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": "0"
+    }
+  ]
+}
