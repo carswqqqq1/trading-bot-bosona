@@ -1,140 +1,38 @@
 """Persistent cash-and-inventory paper copy test using public executable depth.
 
-No orders are submitted. Fees use Gamma feeSchedule and the documented formula
+No orders are submitted. His public trades are taken from the activity stream
+and paper-copied on that same side and market as soon as the trade arrives.
+If the stream drops, the public activity API is read again immediately, with
+no idle poll. Fees use Gamma feeSchedule and the documented formula
 https://docs.polymarket.com/trading/fees (verified 2026-09-30). No settlement.
 SELL fraction uses source holdings observed during this session only; earlier
 leader inventory is unknown and unmatched SELLs are refused.
 
 BUY copies keep his side and market only when the live book can buy the
 5-share minimum at his fill price or better. If latency has already moved the
-ask above that price, the buy is skipped. Each new leader trade is decided as soon
-as the poll that first contains it returns. Nothing waits for a later trade
-before that decision. A paper position is sold inside the
+ask above that price, the buy is skipped. A paper position is sold inside the
 same window when the bid is above its average cost and the sale nets a gain.
 Open cost stays under max_open_cost_usd, which is below the cash balance, so
 one burst cannot spend the whole account. These rules do not guarantee a profit.
 """
 import argparse
-import http.client
 import json
 import math
+import queue
 import re
 import sqlite3
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_CEILING
 from pathlib import Path
-from urllib.parse import quote as urlquote, urlencode, urlsplit
+from urllib.parse import quote as urlquote
 
 from bot import activity, array, decimal as D, get_json, market_timeframe, row_keys, source_skip, validate
+from feed import ActivityWatch, BookPrefetcher, JsonClient, QuoteCache, fill_key
 
 ZERO = Decimal(0)
 STEP = Decimal('0.01')
-# Faster than config poll_seconds. Idle polls wait this long between request
-# starts; a trade already in hand is decided before that wait.
-RUNTIME_POLL_SECONDS = 0.05
-
-
-def same_run_window(source_timestamp, now, run_started):
-    """True when both clocks fall in the same 60-second window from run start."""
-    if source_timestamp is None:
-        return False
-    return int(float(source_timestamp) - float(run_started)) // 60 == int(float(now) - float(run_started)) // 60
-
-
-def _public_read_path(host, path):
-    if host == "data-api.polymarket.com":
-        return path == "/v2/activity"
-    if host == "gamma-api.polymarket.com":
-        return path.startswith("/markets/slug/") and not path.endswith("/markets/slug/")
-    if host == "clob.polymarket.com":
-        return path == "/book"
-    return False
-
-
-class PublicReadClient:
-    """Keep-alive GET client for public market data.
-
-    Refuses order, auth, and signing URLs. Several connections per host so a
-    burst of book reads can run together. Strategy filters are unchanged.
-    """
-
-    def __init__(self, pool_size=4):
-        self._pool_size = pool_size
-        self._slots = {}
-        self._guard = threading.Lock()
-        self._rr = 0
-
-    def close(self):
-        with self._guard:
-            slots = [slot for group in self._slots.values() for slot in group]
-            self._slots.clear()
-        for slot in slots:
-            with slot['lock']:
-                conn = slot.get('conn')
-                if conn is not None:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-
-    def _reserve(self, host):
-        with self._guard:
-            group = self._slots.setdefault(host, [])
-            if len(group) < self._pool_size:
-                group.append({'conn': None, 'lock': threading.Lock()})
-            self._rr += 1
-            order = list(group)
-            start = self._rr % len(order)
-        for offset in range(len(order)):
-            slot = order[(start + offset) % len(order)]
-            if slot['lock'].acquire(blocking=False):
-                return slot
-        slot = order[start]
-        slot['lock'].acquire()
-        return slot
-
-    def get_json(self, base, params=None):
-        parts = urlsplit(base)
-        path = parts.path or "/"
-        if (parts.scheme != "https" or parts.username or parts.password
-                or parts.port not in (None, 443) or not _public_read_path(parts.hostname, path)):
-            raise ValueError("public_read_only")
-        query = urlencode(params) if params else parts.query
-        target = path + (("?" + query) if query else "")
-        slot = self._reserve(parts.hostname)
-        try:
-            error = None
-            for _ in range(2):
-                conn = slot['conn']
-                if conn is None:
-                    conn = http.client.HTTPSConnection(parts.hostname, timeout=5)
-                    slot['conn'] = conn
-                try:
-                    conn.request("GET", target, headers={
-                        "User-Agent": "btc-copy-paper-prototype/0.1",
-                        "Accept": "application/json",
-                        "Connection": "keep-alive",
-                    })
-                    response = conn.getresponse()
-                    body = response.read()
-                    status = response.status
-                except Exception as exc:
-                    error = exc
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                    slot['conn'] = None
-                    continue
-                if status != 200:
-                    raise ValueError("public_read_http_" + str(status))
-                return json.loads(body)
-            raise error
-        finally:
-            slot['lock'].release()
 
 
 def fee_rate(market):
@@ -449,7 +347,8 @@ class PaperJournal:
                 self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
                 source_ts = position['row'].get('timestamp')
                 decision = dict(status='PAPER_SELL',reason='bid_above_paper_cost',rule_skipped=False,
-                                paper=True,executed=False,side='SELL',slug=position['row'].get('slug'),
+                                paper=True,executed=False,live_order_sent=False,side='SELL',
+                                slug=position['row'].get('slug'),
                                 outcome=position['row'].get('outcome'),token_id=token,
                                 shares=str(quantity),gross=str(fill['gross']),fee=str(fill['fee']),
                                 vwap=str(fill['vwap']),our_price=str(fill['vwap']),
@@ -520,9 +419,13 @@ def main():
     parser.add_argument('--db',default='paper48.sqlite3')
     parser.add_argument('--output',default='paper48.jsonl')
     parser.add_argument('--duration',type=float,default=120)
+    parser.add_argument('--until-cash',type=float,default=None,
+                        help='Stop the paper run when cash reaches this many dollars')
     args = parser.parse_args()
     if not math.isfinite(args.duration) or args.duration <= 0:
         parser.error('duration must be positive and finite')
+    if args.until_cash is not None and (not math.isfinite(args.until_cash) or args.until_cash <= 0):
+        parser.error('--until-cash must be positive and finite')
     raw_config = json.loads(Path(args.config).read_text())
     interval = float(D(raw_config['poll_seconds']))
     if not math.isfinite(interval) or interval < 0.25:
@@ -539,160 +442,237 @@ def main():
     if 'max_worse_than_leader' in config and D(config['max_worse_than_leader']) < 0:
         raise ValueError('max_worse_than_leader cannot be negative')
     journal = PaperJournal(args.db,config)
+    client = JsonClient()
     stored = journal.db.execute("SELECT value FROM meta WHERE key='observer_start'").fetchone()
-    observer_start = int(stored[0]) if stored else int(time.time())
+    run_started_wall = time.time()
+    observer_start = int(stored[0]) if stored else int(run_started_wall)
     source_start = observer_start-3600
-    client = PublicReadClient()
-    runtime_poll = min(interval, RUNTIME_POLL_SECONDS)
-    if not stored:
-        journal.baseline(activity(config['leader_wallet'],source_start,int(time.time()),client.get_json),observer_start)
-    started, run_started_wall, observations = time.monotonic(),time.time(),{}
-    with Path(args.output).open('a') as output, ThreadPoolExecutor(max_workers=8) as pool:
+    quotes = QuoteCache()
+    prefetcher = BookPrefetcher(JsonClient(), quotes)
+    seen_fills=set()
+    prior=[json.loads(item[0]) for item in journal.db.execute('SELECT payload FROM seen')]
+    sample_start_cash=journal.cash
+    sample_start_realized=sum((D(item.get('realized_pnl_usd','0')) for item in prior
+                               if item.get('status') in ('PAPER_BUY','PAPER_SELL')), ZERO)
+    started, observations, pending, attempts = time.monotonic(), {}, {}, {}
+    stopped_for_cash=False
+    with Path(args.output).open('a') as output, ThreadPoolExecutor(max_workers=4) as pool:
         def emit(record):
+            record.setdefault('paper', True)
+            record.setdefault('executed', False)
+            record.setdefault('live_order_sent', False)
             line=json.dumps(record)
             output.write(line+'\n');output.flush();print(line,flush=True)
-        def window_index(moment):
-            return int(float(moment)-run_started_wall)//60
-        def stamp(record, moment):
-            record['run_window_index']=window_index(moment)
-            record['paper']=True
-            record['executed']=False
-            return record
-        emit(dict(status='STARTED',continuation=True,starting_cash_usd=str(config['starting_cash_usd']),
-                  cash_usd=str(journal.cash),
-                  paper=True,executed=False,live_order_sent=False,public_read_only=True,
-                  observer_start_utc=datetime.fromtimestamp(observer_start,timezone.utc).isoformat(),
+        def warm():
+            now=int(time.time())
+            slug='btc-updown-5m-'+str(now-(now%300))
+            try:
+                market=client('https://gamma-api.polymarket.com/markets/slug/'+urlquote(slug,safe=''))
+                tokens=array(market['clobTokenIds']) if market.get('clobTokenIds') else []
+                for token in tokens:
+                    client('https://clob.polymarket.com/book',{'token_id':token})
+            except Exception:
+                pass
+        def book_timestamp_fresh(book, now):
+            try:
+                age=float(now)*1000-float(book['timestamp'])
+            except (KeyError, TypeError, ValueError):
+                return False
+            return -1000<=age<=float(config['max_book_age_seconds'])*1000
+        def on_trade(row):
+            hit=quotes.take(str(row['token_id']), row.get('slug'), time.time(), 1.0)
+            if hit and book_timestamp_fresh(hit[1], time.time()):
+                return ('cache', hit)
+            market_future=pool.submit(client,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'],safe=''))
+            book_future=pool.submit(client,'https://clob.polymarket.com/book',{'token_id':row['token_id']})
+            return ('fetch', market_future, book_future)
+        watch=ActivityWatch(config['leader_wallet'], on_trade=on_trade)
+        watch.start()
+        prefetcher.start()
+        if not stored:
+            older=[row for row in activity(config['leader_wallet'],source_start,int(time.time()),client)
+                   if int(row['timestamp'])<run_started_wall]
+            journal.baseline(older,observer_start)
+            seen_fills.update(fill_key(row) for row in older)
+        for job in (pool.submit(warm),pool.submit(warm)):
+            job.result()
+        connected=watch.connected.wait(2)
+        emit(dict(status='STARTED',continuation=True,starting_cash_usd=str(config['starting_cash_usd']),cash_usd=str(journal.cash),
+                  sample_start_cash_usd=str(sample_start_cash),
+                  paper=True,executed=False,observer_start_utc=datetime.fromtimestamp(observer_start,timezone.utc).isoformat(),
                   run_started_at_utc=datetime.fromtimestamp(run_started_wall,timezone.utc).isoformat(),
-                  configured_poll_seconds=config['poll_seconds'],runtime_poll_seconds=runtime_poll,
-                  poll_seconds=runtime_poll))
-        last_window = 0
-        emit(dict(status='WINDOW',run_window_index=0,paper=True,executed=False,live_order_sent=False,
-                  window_start_utc=datetime.fromtimestamp(run_started_wall,timezone.utc).isoformat()))
-        def launch_activity():
-            def run():
-                end=int(time.time())
-                return activity(config['leader_wallet'],max(source_start,end-120),end,client.get_json)
-            return pool.submit(run), time.monotonic()
-        def emit_exit(market, book, decided_at, source_ts):
-            exited=journal.realize_if_bid_above_cost(market, book, decided_at)
-            if not exited:
+                  idle_poll_seconds=0,watch='wss://ws-live-data.polymarket.com activity/trades',
+                  activity_stream_connected=connected,until_cash_usd=args.until_cash))
+        def eligible(row):
+            return (row.get('proxy_wallet','').lower()==config['leader_wallet'].lower()
+                    and row.get('type')=='TRADE' and not row.get('is_combo') and row.get('side') in ('BUY','SELL')
+                    and market_timeframe(row.get('slug')) in config['timeframes_minutes']
+                    and int(row['timestamp'])>=observer_start)
+        def consider(row, arrived, transport, prepared=None):
+            if not eligible(row):
                 return
-            exited['live_order_sent']=False
-            exited['same_window_as_entry']=same_run_window(source_ts, decided_at, run_started_wall)
-            emit(stamp(exited, decided_at))
-        future=None
-        request_started=time.monotonic()
-        try:
-            while time.monotonic()-started < args.duration:
-                now_wall = time.time()
-                idx = window_index(now_wall)
-                while idx > last_window and time.monotonic()-started < args.duration:
-                    last_window += 1
-                    emit(dict(status='WINDOW',run_window_index=last_window,paper=True,executed=False,
-                              live_order_sent=False,
-                              window_start_utc=datetime.fromtimestamp(run_started_wall+last_window*60,timezone.utc).isoformat()))
-                if future is None:
-                    future, request_started = launch_activity()
+            identity=fill_key(row)
+            if identity in seen_fills or identity in pending:
+                return
+            pending[identity]=(row,arrived,transport,prepared)
+        def live_quote(row):
+            fetch_started=time.perf_counter()
+            market_future=pool.submit(client,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'],safe=''))
+            book_future=pool.submit(client,'https://clob.polymarket.com/book',{'token_id':row['token_id']})
+            return market_future.result(), book_future.result(), time.perf_counter()-fetch_started, 0.0, 'live'
+        def resolve_quote(row, prepared):
+            if prepared and prepared[0]=='cache':
+                market, book, age = prepared[1]
+                if book_timestamp_fresh(book, time.time()):
+                    return market, book, 0.0, age, 'prefetch'
+            if prepared and prepared[0]=='fetch':
+                fetch_started=time.perf_counter()
+                return prepared[1].result(), prepared[2].result(), time.perf_counter()-fetch_started, 0.0, 'live'
+            return live_quote(row)
+        def copy_now(row, arrived, transport, prepared):
+            identity=fill_key(row)
+            key=next(item[0] for item in row_keys([row]))
+            waited=max(0, time.time()-arrived)
+            if identity not in observations:
+                delay=arrived-int(row['timestamp'])
+                observations[identity]=dict(delay=delay,continuous_sample=int(row['timestamp'])>=run_started_wall,
+                                            transport=transport,decision=None,fetch=None,quote=None)
+                emit(dict(status='OBSERVED',event_id=key,side=row['side'],slug=row['slug'],outcome=row.get('outcome'),
+                          source_transaction=row.get('transaction_hash'),source_timestamp_seconds=row['timestamp'],
+                          first_seen_at_utc=datetime.fromtimestamp(arrived,timezone.utc).isoformat(),
+                          source_to_first_seen_seconds=round(delay,3),transport=transport,
+                          continuous_run_latency_sample=observations[identity]['continuous_sample'],
+                          seen_before_run_start=not observations[identity]['continuous_sample']))
+            backlog=int(row['timestamp'])<run_started_wall
+            reason='resume_backlog_not_copied' if backlog else source_skip(dict(row,side='BUY'),config,time.time())
+            market=book={}
+            fetch_seconds=quote_age=None
+            quote_source=None
+            if not reason:
+                market, book, fetch_seconds, quote_age, quote_source = resolve_quote(row, prepared)
+                observations[identity]['fetch']=fetch_seconds
+                observations[identity]['quote']=quote_source
+            decision=journal.process(key,row,market,book,time.time(),
+                                     skip_reason='resume_backlog_not_copied' if backlog else None)
+            decision['transport']=transport
+            decision['queue_wait_seconds']=round(waited,3)
+            if fetch_seconds is not None:
+                decision['book_fetch_seconds']=round(fetch_seconds,3)
+                decision['quote_age_seconds']=round(quote_age,3)
+                decision['quote_source']=quote_source
+            if decision.get('source_to_decision_seconds') is not None:
+                observations[identity]['decision']=decision['source_to_decision_seconds']
+            emit(decision)
+        def flush():
+            for identity,(row,arrived,transport,prepared) in list(pending.items()):
                 try:
-                    rows=future.result()
+                    copy_now(row,arrived,transport,prepared)
                 except Exception as exc:
-                    emit(dict(status='ERROR',message=str(exc),paper=True,executed=False,live_order_sent=False))
-                    future=None
-                    remaining=args.duration-(time.monotonic()-started)
-                    if remaining > 0:
-                        time.sleep(min(2, remaining))
-                    continue
-                future=None
-                if time.monotonic()-request_started >= runtime_poll and time.monotonic()-started < args.duration:
-                    future, request_started = launch_activity()
-                try:
-                    pending=[]
-                    for key,row in row_keys(rows):
-                        if journal.contains(key):
-                            continue
-                        if (row.get('proxy_wallet','').lower()!=config['leader_wallet'].lower()
-                            or row.get('type')!='TRADE' or row.get('is_combo') or row.get('side') not in ('BUY','SELL')
-                            or market_timeframe(row.get('slug')) not in config['timeframes_minutes']
-                            or int(row['timestamp']) < observer_start):
-                            continue
-                        pending.append((key,row))
-                    # Quotes for every trade already in this response start together.
-                    # Decisions still apply in timestamp order so a later trade cannot
-                    # change the earlier one. Nothing waits for a trade not yet seen.
-                    pending.sort(key=lambda item: int(item[1]['timestamp']))
-                    quoted=[]
-                    for queue_index,(key,row) in enumerate(pending):
-                        seen_at=time.time()
-                        if key not in observations:
-                            observations[key]={'delay':seen_at-int(row['timestamp']),
-                                               'continuous_sample':int(row['timestamp'])>=run_started_wall}
-                            emit(stamp(dict(status='OBSERVED',event_id=key,side=row['side'],slug=row['slug'],
-                                      outcome=row.get('outcome'),source_price=row.get('price'),
-                                      source_transaction=row.get('transaction_hash'),
-                                      source_timestamp_seconds=row['timestamp'],
-                                      first_seen_at_utc=datetime.fromtimestamp(seen_at,timezone.utc).isoformat(),
-                                      source_to_first_seen_seconds=round(observations[key]['delay'],3),
-                                      continuous_run_latency_sample=observations[key]['continuous_sample'],
-                                      seen_before_run_start=not observations[key]['continuous_sample'],
-                                      queue_index=queue_index), seen_at))
-                        backlog = int(row['timestamp']) < run_started_wall
-                        reason=('resume_backlog_not_copied' if backlog else
-                                source_skip(dict(row,side='BUY'),config,time.time()))
-                        if reason:
-                            quoted.append((queue_index,key,row,None,None,reason))
-                        else:
-                            market_future=pool.submit(client.get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'],safe=''))
-                            book_future=pool.submit(client.get_json,'https://clob.polymarket.com/book',{'token_id':row['token_id']})
-                            quoted.append((queue_index,key,row,market_future,book_future,None))
-                    for queue_index,key,row,market_future,book_future,reason in quoted:
-                        try:
-                            if reason:
-                                market=book={}
-                            else:
-                                market,book=market_future.result(),book_future.result()
-                            decided_at=time.time()
-                            decision=journal.process(key,row,market,book,decided_at,
-                                                     skip_reason='resume_backlog_not_copied' if reason=='resume_backlog_not_copied' else None)
-                            decision['queue_index']=queue_index
-                            decision['live_order_sent']=False
-                            emit(stamp(decision, decided_at))
-                            if decision.get('status')=='PAPER_BUY':
-                                emit_exit(market, book, time.time(), row.get('timestamp'))
-                        except Exception as exc:
-                            emit(dict(status='ERROR',message=str(exc),event_id=key,paper=True,executed=False,live_order_sent=False))
-                except Exception as exc:
-                    emit(dict(status='ERROR',message=str(exc),paper=True,executed=False,live_order_sent=False))
-                for token,position in list(journal.holdings().items()):
-                    if position['shares'] <= 0:
+                    attempts[identity]=attempts.get(identity,0)+1
+                    emit(dict(status='ERROR',message=str(exc),source_transaction=row.get('transaction_hash')))
+                    if attempts[identity]<4 and time.time()-int(row['timestamp'])<=config['max_signal_age_seconds']:
                         continue
-                    source_ts = position['row'].get('timestamp')
+                pending.pop(identity,None)
+                seen_fills.add(identity)
+        def exit_scan():
+            for token,position in list(journal.holdings().items()):
+                if position['shares']<=0:
+                    continue
+                try:
+                    hit=quotes.take(token, position['row'].get('slug'), time.time(), 1.0)
+                    if hit and book_timestamp_fresh(hit[1], time.time()):
+                        market, book = hit[0], hit[1]
+                    else:
+                        market_future=pool.submit(client,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
+                        book_future=pool.submit(client,'https://clob.polymarket.com/book',{'token_id':token})
+                        market, book = market_future.result(), book_future.result()
+                    exited=journal.realize_if_bid_above_cost(market,book,time.time())
+                    if exited:
+                        emit(exited)
+                except Exception as exc:
+                    emit(dict(status='ERROR',message=str(exc)))
+        try:
+            next_exit=time.monotonic()
+            was_connected=connected
+            while time.monotonic()-started<args.duration:
+                if watch.connected.is_set()!=was_connected:
+                    was_connected=watch.connected.is_set()
+                    emit(dict(status='WATCH',activity_stream_connected=was_connected,
+                              error=watch.errors[-1] if watch.errors and not was_connected else None))
+                remaining=args.duration-(time.monotonic()-started)
+                if watch.connected.is_set():
                     try:
-                        market_future=pool.submit(client.get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
-                        book_future=pool.submit(client.get_json,'https://clob.polymarket.com/book',{'token_id':token})
-                        decided_at=time.time()
-                        emit_exit(market_future.result(), book_future.result(), decided_at, source_ts)
+                        pending_item=watch.queue.get(timeout=min(0.25,max(0,remaining)))
+                    except queue.Empty:
+                        pending_item=None
+                    batch=[pending_item] if pending_item else []
+                    while True:
+                        try:
+                            batch.append(watch.queue.get_nowait())
+                        except queue.Empty:
+                            break
+                    for arrived,row,transport,prepared in batch:
+                        consider(row,arrived,transport,prepared)
+                else:
+                    try:
+                        end=int(time.time())
+                        rows=activity(config['leader_wallet'],max(source_start,end-120),end,client)
+                        seen_at=time.time()
+                        for _,row in row_keys(rows):
+                            consider(row,seen_at,'activity_rest',None)
                     except Exception as exc:
-                        emit(dict(status='ERROR',message=str(exc),paper=True,executed=False,live_order_sent=False))
-                if future is None and time.monotonic()-started < args.duration:
-                    remaining=args.duration-(time.monotonic()-started)
-                    wait=runtime_poll-(time.monotonic()-request_started)
-                    if remaining > 0 and wait > 0:
-                        time.sleep(min(wait, remaining))
-                    if time.monotonic()-started < args.duration:
-                        future, request_started = launch_activity()
+                        emit(dict(status='ERROR',message=str(exc)))
+                        time.sleep(min(0.5,max(0,args.duration-(time.monotonic()-started))))
+                flush()
+                if args.until_cash is not None and journal.cash>=D(str(args.until_cash)):
+                    stopped_for_cash=True
+                    emit(dict(status='CASH_TARGET',cash_usd=str(journal.cash),target_usd=str(args.until_cash)))
+                    break
+                if not pending and watch.queue.empty() and time.monotonic()>=next_exit:
+                    exit_scan()
+                    next_exit=time.monotonic()+0.25
+                    if args.until_cash is not None and journal.cash>=D(str(args.until_cash)):
+                        stopped_for_cash=True
+                        emit(dict(status='CASH_TARGET',cash_usd=str(journal.cash),target_usd=str(args.until_cash)))
+                        break
         except KeyboardInterrupt:
             pass
-        portfolio=journal.portfolio(client.get_json)
-        portfolio['live_order_sent']=False
-        emit(portfolio)
-        delays=sorted(v['delay'] for v in observations.values() if v['continuous_sample'] and v['delay']>=0)
+        finally:
+            watch.close()
+            prefetcher.close()
+        report=journal.portfolio(client)
+        emit(report)
+        sample_realized=D(report.get('realized_pnl_usd','0'))-sample_start_realized
+        fresh=[item for item in observations.values() if item['continuous_sample'] and item['delay']>=0]
+        delays=sorted(item['delay'] for item in fresh)
+        decisions=sorted(item['decision'] for item in fresh if item['decision'] is not None)
+        fetches=sorted(item['fetch'] for item in fresh if item['fetch'] is not None)
+        def median(values):
+            if not values:
+                return None
+            return (values[(len(values)-1)//2]+values[len(values)//2])/2
         emit(dict(status='SUMMARY',duration_seconds=round(time.monotonic()-started,2),observations=len(observations),
                   continuous_run_latency_samples=len(delays),
-                  first_seen_delay_min_seconds=min(delays) if delays else None,
-                  first_seen_delay_max_seconds=max(delays) if delays else None,
-                  live_order_sent=False,
-                  note='Snapshot depth simulations; no live fills, settlement or guaranteed execution latency.'))
-    client.close()
+                  first_seen_delay_min_seconds=delays[0] if delays else None,
+                  first_seen_delay_median_seconds=median(delays),
+                  first_seen_delay_p95_seconds=delays[math.ceil(len(delays)*0.95)-1] if delays else None,
+                  first_seen_delay_max_seconds=delays[-1] if delays else None,
+                  decision_delay_min_seconds=decisions[0] if decisions else None,
+                  decision_delay_median_seconds=median(decisions),
+                  decision_delay_p95_seconds=decisions[math.ceil(len(decisions)*0.95)-1] if decisions else None,
+                  decision_delay_max_seconds=decisions[-1] if decisions else None,
+                  book_fetch_median_seconds=median(fetches),
+                  book_fetch_max_seconds=fetches[-1] if fetches else None,
+                  websocket_samples=sum(item['transport']=='activity_websocket' for item in fresh),
+                  rest_fallback_samples=sum(item['transport']=='activity_rest' for item in fresh),
+                  prefetch_quotes=sum(item.get('quote')=='prefetch' for item in fresh),
+                  live_quotes=sum(item.get('quote')=='live' for item in fresh),
+                  sample_start_cash_usd=str(sample_start_cash),
+                  sample_realized_pnl_usd=str(sample_realized),
+                  ending_cash_usd=str(journal.cash),
+                  stopped_because='cash_target' if stopped_for_cash else 'duration',
+                  idle_poll_seconds=0,
+                  note='Public activity-stream detection and a paper book quote. Source timestamps are 1-second precision. No live fills and no guaranteed profit.'))
 
 
 if __name__=='__main__':

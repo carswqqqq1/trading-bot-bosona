@@ -296,29 +296,5 @@ class PaperJournalTests(unittest.TestCase):
         self.assertGreater(Decimal(report["realized_pnl_usd"]), 0)
 
 
-class ImmediateCopyTests(unittest.TestCase):
-    def test_same_run_window_is_sixty_seconds_from_the_start(self):
-        start = 1_000_000.5
-        self.assertTrue(paper.same_run_window(start, start + 59.9, start))
-        self.assertFalse(paper.same_run_window(start, start + 60, start))
-        self.assertFalse(paper.same_run_window(None, start, start))
-
-    def test_public_read_client_refuses_trading_endpoints(self):
-        client = paper.PublicReadClient()
-        for url in (
-            "https://clob.polymarket.com/order",
-            "https://clob.polymarket.com/auth/api-key",
-            "https://gamma-api.polymarket.com/orders",
-            "http://data-api.polymarket.com/v2/activity",
-            "https://clob.polymarket.com/book/../order",
-        ):
-            with self.assertRaises(ValueError):
-                client.get_json(url)
-        self.assertTrue(paper._public_read_path("clob.polymarket.com", "/book"))
-        self.assertTrue(paper._public_read_path("data-api.polymarket.com", "/v2/activity"))
-        self.assertTrue(paper._public_read_path("gamma-api.polymarket.com", "/markets/slug/btc-updown-5m-1"))
-        self.assertFalse(paper._public_read_path("clob.polymarket.com", "/order"))
-
-
 if __name__ == "__main__":
     unittest.main()
