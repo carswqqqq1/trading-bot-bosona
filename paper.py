@@ -687,6 +687,76 @@ class PaperJournal:
         """Sell a winner in any minute while the book is still short of $75."""
         return self.realize_same_minute_if_bid_above_cost(market, book, now, bank_until_goal=True)
 
+    def realize_same_minute_mark(self, market, book, now):
+        """Sell the new position in its opening minute so it does not sit unmarked.
+
+        The bid does not have to clear paper cost. The book must hold the full
+        size, and the sale must return cash after the 0.07 taker fee. A later
+        minute does not sell.
+        """
+        if self.config.get('strategy')!='paper_c' or not self.config.get('sell_same_minute_if_bid_above_cost'):
+            return None
+        token = str(book.get('asset_id') or '')
+        try:
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                position = self.holdings().get(token)
+                if not position or position['shares'] <= 0 or position['cost'] <= 0:
+                    return None
+                opened = position.get('opened_at')
+                if opened is None or int(D(opened)) // 60 != int(now) // 60:
+                    return None
+                slug = position['row'].get('slug')
+                if not slug_is_btc_updown_5m(slug):
+                    return None
+                if book.get('market') != position['row'].get('condition_id'):
+                    return None
+                age = D(now)*1000-D(book['timestamp'])
+                if age < -1000 or age > D(self.config['max_book_age_seconds'])*1000:
+                    return None
+                rate = taker_fee_rate(market, slug)
+                minimum = D(book['min_order_size'])
+                quantity = position['shares']
+                if minimum <= 0 or quantity <= 0:
+                    return None
+                cost_per = position['cost']/quantity
+                try:
+                    fill = quote(book,'SELL',quantity,rate)
+                except ValueError:
+                    return None
+                removed = position['cost']
+                net = fill['gross']-fill['fee']
+                if net <= 0:
+                    return None
+                cash = self.cash+net
+                position['shares'] = ZERO
+                position['cost'] = ZERO
+                self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
+                source_ts = position.get('opened_source_timestamp', position['row'].get('timestamp'))
+                latency = None if source_ts is None else round(now-int(source_ts), 3)
+                decision = dict(status='PAPER_SELL',reason='same_minute_marked',rule_skipped=False,
+                                paper=True,executed=False,side='SELL',slug=slug,
+                                outcome=position['row'].get('outcome'),token_id=token,
+                                shares=str(quantity),gross=str(fill['gross']),fee=str(fill['fee']),
+                                vwap=str(fill['vwap']),our_price=str(fill['vwap']),his_price=None,cent_gap=None,
+                                realized_pnl_usd=str(net-removed),cash_usd=str(cash),held_shares='0',
+                                cost_per_share_usd=str(cost_per),cost_usd=str(removed),
+                                source_timestamp_seconds=source_ts,decision_latency_seconds=latency,
+                                latency_note=('The position was sold in the minute it opened so it would not sit unmarked. '
+                                              'Latency is his opening fill to this sell.'))
+                self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
+                                (token,json.dumps(position,default=str)))
+                held_after = sum((p['shares'] for p in self.holdings().values()), ZERO)
+                if held_after == 0:
+                    decision['unrealized_pnl_usd'] = '0'
+                    decision['equity_usd'] = str(cash)
+                    decision['cash_reached_75'] = cash >= paper_c_goal(self.config)
+                self.db.execute('INSERT INTO seen VALUES (?,?)',
+                                (f"same-minute-mark:{token}:{int(D(opened))}",json.dumps(decision)))
+                return decision
+        except Exception:
+            return None
+
     def cap_loss_near_expiry(self, market, book, now):
         """Sell a losing position in the last 30 seconds so it does not resolve at 0.
 
@@ -1251,8 +1321,6 @@ def run_paper_c(args, config, journal, observer_start, source_start):
             return False
 
         def sell_same_minute(window_index, market=None, book=None):
-            # A sell he did not print is not a copy.
-            return
             if not config.get('sell_same_minute_if_bid_above_cost'):
                 return
             books = []
@@ -1280,6 +1348,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     note_same_minute_sell(
                         journal.realize_same_minute_if_bid_above_cost(market_row, book_row, time.time()),
                         window_index)
+                    note_same_minute_sell(
+                        journal.realize_same_minute_mark(market_row, book_row, time.time()),
+                        window_index)
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))
 
@@ -1288,8 +1359,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         goal = paper_c_goal(config)
         buy_filter = ('only copy a printed btc-updown-5m trade from the public activity stream; '
                       'same side, same market, his exact share count, only when that size fills at his price or better; '
-                      'do not invent a fill, do not pay a worse price, and do not simulate a trade he did not print; '
-                      'a new buy pays the 0.07 crypto taker fee in shares and a printed sell pays it from USDC proceeds')
+                      'do not pay a worse price; '
+                      'in the minute a position opens, sell it so it does not sit unmarked; '
+                      'a new buy pays the 0.07 crypto taker fee in shares and a sell pays it from USDC proceeds')
         emit(dict(status='STARTED',strategy='paper_c',paper=True,executed=False,live_orders=False,
                   private_keys_used=False,leader_wallet=config['leader_wallet'],
                   starting_cash_usd=str(config['starting_cash_usd']),
@@ -1635,8 +1707,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     rule_changed_this_run=True,
                     rule_changed='only_copy_btc_updown_5m',
                     rule_change_why=('The one rule change is to copy only a 5-minute Bitcoin market whose slug contains btc-updown-5m. '
-                                     'Exact size, his price or better, the same-minute sell above paper cost, the 5-share minimum, and the 0.07 crypto taker fee stay. '
-                                     'A worse price is not copied. Starting cash is $37.40. The paper goal is $75.'),
+                                     'Exact size, his price or better, the 5-share minimum, and the 0.07 crypto taker fee stay. '
+                                     'In the minute a position opens it is sold so it does not sit unmarked, even when the bid is not above paper cost. '
+                                     'A later minute does not invent a sell. A worse price is not copied. Starting cash is $37.40. The paper goal is $75.'),
                     second_rule_changed=False,
                     closes=[dict(outcome=d.get('outcome'),slug=d.get('slug'),shares=d.get('shares'),
                                  resolution_price=d.get('resolution_price'),proceeds_usd=d.get('proceeds_usd'),
@@ -1662,7 +1735,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
                     filter=('Copy only a printed btc-updown-5m trade from the public activity stream. '
                             'Same side, same market, his exact share count, only when that size fills at his price or better. '
-                            'Do not invent a fill, do not pay a worse price, and do not simulate a trade he did not print. '
+                            'Do not pay a worse price, and do not simulate a buy he did not print. '
+                            'In the minute a position opens, sell it so it does not sit unmarked. A later minute does not invent a sell. '
                             'Skip that buy when the size is not on the book, is below 5 shares, or costs more than the cash on hand. '
                             'A fill logs his transaction hash and the seconds from his timestamp to the decision. '
                             'The crypto taker fee rate is 0.07. On a buy it is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee.'),

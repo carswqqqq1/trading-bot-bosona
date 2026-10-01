@@ -535,6 +535,38 @@ class PaperCTests(unittest.TestCase):
         self.assertGreater(journal.cash, Decimal("39"))
         again = journal.realize_same_minute_if_bid_above_cost(market(), live, NOW)
         self.assertIsNone(again)
+        self.assertIsNone(journal.realize_same_minute_mark(market(), live, NOW))
+
+    def test_same_minute_bid_below_cost_marks_so_the_position_does_not_sit(self):
+        journal = self.journal(copy_buys_at_or_better=True, sell_same_minute_if_bid_above_cost=True)
+        opened = book(asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.30", "size": "100"}])
+        bought = journal.process("buy-open", row(price="0.50", size="10", timestamp=NOW - 1), market(), opened, NOW)
+        self.assertEqual(bought["status"], "PAPER_BUY")
+        cash_after_buy = journal.cash
+        self.assertIsNone(journal.realize_same_minute_if_bid_above_cost(market(), opened, NOW))
+        sold = journal.realize_same_minute_mark(market(), opened, NOW)
+        self.assertEqual(sold["status"], "PAPER_SELL")
+        self.assertEqual(sold["reason"], "same_minute_marked")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+        self.assertLess(Decimal(sold["realized_pnl_usd"]), 0)
+        self.assertGreater(Decimal(sold["realized_pnl_usd"]), -Decimal(bought["gross"]))
+        self.assertGreater(journal.cash, cash_after_buy)
+        self.assertEqual(sold["cash_reached_75"], False)
+        self.assertEqual(sold["decision_latency_seconds"], 1)
+        self.assertIsNone(journal.realize_same_minute_mark(market(), opened, NOW))
+        later_book = self.journal(copy_buys_at_or_better=True, sell_same_minute_if_bid_above_cost=True)
+        later_buy = later_book.process(
+            "buy-later", row(price="0.50", size="10", timestamp=NOW - 1, transaction_hash="0xlater"),
+            market(), opened, NOW,
+        )
+        later = book(timestamp=(NOW + 60) * 1000, asks=[{"price": "0.40", "size": "100"}],
+                     bids=[{"price": "0.30", "size": "100"}])
+        self.assertIsNone(later_book.realize_same_minute_mark(market(), later, NOW + 60))
+        self.assertEqual(later_book.holdings()[TOKEN_UP]["shares"], Decimal(later_buy["shares"]))
+        quiet = self.journal(copy_buys_at_or_better=True)
+        quiet.process("buy-quiet", row(price="0.50", size="10", timestamp=NOW - 1, transaction_hash="0xquiet"),
+                      market(), opened, NOW)
+        self.assertIsNone(quiet.realize_same_minute_mark(market(), opened, NOW))
 
     def test_a_later_minute_or_a_thin_bid_does_not_sell(self):
         journal = self.journal(copy_buys_at_or_better=True, sell_same_minute_if_bid_above_cost=True)
