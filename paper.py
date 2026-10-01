@@ -526,7 +526,6 @@ def main():
             return ('fetch', market_future, book_future)
         watch=ActivityWatch(config['leader_wallet'], on_trade=on_trade)
         watch.start()
-        prefetcher.start()
         if not stored:
             older=[row for row in activity(config['leader_wallet'],source_start,int(time.time()),client)
                    if int(row['timestamp'])<run_started_wall]
@@ -600,6 +599,8 @@ def main():
                 decision['quote_source']=quote_source
             if decision.get('source_to_decision_seconds') is not None:
                 observations[identity]['decision']=decision['source_to_decision_seconds']
+            if isinstance(book, dict) and book.get('asset_id') and isinstance(market, dict) and market.get('slug'):
+                quotes.store(str(row['token_id']), market, book, time.time())
             emit(decision)
         def flush():
             for identity,(row,arrived,transport,prepared) in list(pending.items()):
@@ -612,27 +613,35 @@ def main():
                         continue
                 pending.pop(identity,None)
                 seen_fills.add(identity)
+        def publish_open():
+            prefetcher.set_open(
+                (token, position['row'].get('slug'))
+                for token, position in journal.holdings().items()
+                if position['shares'] > 0 and position['row'].get('slug'))
+        publish_open()
+        prefetcher.start()
         def exit_scan():
+            now = time.time()
             for token,position in list(journal.holdings().items()):
                 if position['shares']<=0:
                     continue
-                if not exit_in_entry_minute(position['row'].get('timestamp'), time.time()):
+                if not exit_in_entry_minute(position['row'].get('timestamp'), now):
                     continue
+                # A same-minute sell uses the book already in hand. It does not GET.
+                hit=quotes.take(token, position['row'].get('slug'), now, float(config['max_book_age_seconds']))
+                if not hit or not book_timestamp_fresh(hit[1], now):
+                    continue
+                market, book, age = hit
                 try:
-                    hit=quotes.take(token, position['row'].get('slug'), time.time(), 1.0)
-                    if hit and book_timestamp_fresh(hit[1], time.time()):
-                        market, book = hit[0], hit[1]
-                    else:
-                        market_future=pool.submit(client,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
-                        book_future=pool.submit(client,'https://clob.polymarket.com/book',{'token_id':token})
-                        market, book = market_future.result(), book_future.result()
-                    exited=journal.realize_if_bid_above_cost(market,book,time.time())
+                    exited=journal.realize_if_bid_above_cost(market,book,now)
                     if exited:
+                        exited['quote_source']='prefetch'
+                        exited['book_fetch_seconds']=0.0
+                        exited['quote_age_seconds']=round(age, 3)
                         emit(exited)
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))
         try:
-            next_exit=time.monotonic()
             was_connected=connected
             while time.monotonic()-started<args.duration:
                 if watch.connected.is_set()!=was_connected:
@@ -664,13 +673,13 @@ def main():
                         emit(dict(status='ERROR',message=str(exc)))
                         time.sleep(min(0.5,max(0,args.duration-(time.monotonic()-started))))
                 flush()
+                publish_open()
                 if args.until_cash is not None and journal.cash>=D(str(args.until_cash)):
                     stopped_for_cash=True
                     emit(dict(status='CASH_TARGET',cash_usd=str(journal.cash),target_usd=str(args.until_cash)))
                     break
-                if not pending and watch.queue.empty() and time.monotonic()>=next_exit:
+                if not pending and watch.queue.empty():
                     exit_scan()
-                    next_exit=time.monotonic()+0.25
                     if args.until_cash is not None and journal.cash>=D(str(args.until_cash)):
                         stopped_for_cash=True
                         emit(dict(status='CASH_TARGET',cash_usd=str(journal.cash),target_usd=str(args.until_cash)))

@@ -236,13 +236,20 @@ class QuoteCache:
 
 
 class BookPrefetcher:
-    """Keep the current BTC 5-minute and 15-minute books warm. No orders."""
+    """Keep current BTC books and any open paper position warm. No orders."""
 
     def __init__(self, client, cache):
         self.client = client
         self.cache = cache
         self.stop = threading.Event()
         self._thread = None
+        self._lock = threading.Lock()
+        self._open = {}
+
+    def set_open(self, pairs):
+        """Remember (token, slug) pairs whose books a sell may need."""
+        with self._lock:
+            self._open = {str(token): slug for token, slug in pairs if token and slug}
 
     def start(self):
         self._thread = threading.Thread(target=self._run, name="book-prefetch", daemon=True)
@@ -266,10 +273,13 @@ class BookPrefetcher:
 
     def refresh(self):
         now = int(time.time())
-        slugs = (
+        with self._lock:
+            open_slugs = set(self._open.values())
+        slugs = {
             "btc-updown-5m-" + str(now - now % 300),
             "btc-updown-15m-" + str(now - now % 900),
-        )
+        }
+        slugs.update(slug for slug in open_slugs if slug)
         with ThreadPoolExecutor(max_workers=4) as pool:
             markets = {}
             requests = {
