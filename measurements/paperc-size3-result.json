@@ -1,0 +1,132 @@
+{
+  "name": "Paper C",
+  "paper_only": true,
+  "live_orders": false,
+  "private_keys_used": false,
+  "brez_used": false,
+  "leader_wallet": "0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed",
+  "leader_handle": "@bosona",
+  "starting_cash_usd": "39",
+  "ending_cash_usd": "0.39928225",
+  "realized_pnl_usd": "-10.61788775",
+  "unrealized_pnl_usd": "-2.64123",
+  "equity_usd": "25.74088225",
+  "any_sell_copied": false,
+  "sells_copied": 0,
+  "decisions": 3,
+  "decision_latency_seconds": [
+    {
+      "window": 1,
+      "side": "BUY",
+      "slug": "btc-updown-15m-1790820900",
+      "action": "PAPER_BUY",
+      "reason": null,
+      "his_price": "0.08",
+      "our_price": "0.07",
+      "cent_gap": "-1.00",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": null,
+      "latency_seconds": 1.428
+    },
+    {
+      "window": 1,
+      "side": "BUY",
+      "slug": "btc-updown-5m-1790821200",
+      "action": "SKIP",
+      "reason": "his_size_exceeds_cash",
+      "his_price": "0.68",
+      "our_price": "0.54",
+      "cent_gap": "-14.00",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": null,
+      "latency_seconds": 0.488
+    }
+  ],
+  "reset_to_39": false,
+  "rule_changed_this_run": false,
+  "rule_changed": null,
+  "rule_change_why": null,
+  "second_rule_changed": false,
+  "closes": [
+    {
+      "outcome": "Up",
+      "slug": "btc-updown-5m-1790820600",
+      "shares": "102.394683",
+      "resolution_price": "0",
+      "proceeds_usd": "0.000000",
+      "cost_usd": "4.50104233",
+      "realized_pnl_usd": "-4.50104233",
+      "cash_usd": "11.58283225",
+      "unrealized_pnl_usd": null,
+      "equity_usd": null,
+      "equity_reached_78": null,
+      "decision_latency_seconds": null,
+      "latency_note": "Public resolution is not one of his fills, so there is no fill-to-action latency.",
+      "price_source": "gamma.outcomePrices"
+    }
+  ],
+  "book_was_steadily_losing": false,
+  "goal_usd": "78",
+  "goal_reached": false,
+  "poll_seconds": 0.05,
+  "latency_definition": "seconds from his fill timestamp to the paper copy or skip",
+  "filter": "Copy his exact share count, same side and market, only when the book fills at his price or better. Skip that buy when the size costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. Copy a sell only when it closes an existing paper position above paper cost.",
+  "windows": [
+    {
+      "window": 1,
+      "trades": 2,
+      "note": null,
+      "his_trades": [
+        {
+          "window": 1,
+          "action": "PAPER_BUY",
+          "reason": null,
+          "his_trade": {
+            "side": "BUY",
+            "slug": "btc-updown-15m-1790820900",
+            "outcome": "Up",
+            "size": "150.0",
+            "price": "0.08",
+            "transaction": "0x40629205c4db49fea0db87b6845a4152bd9f7a9df35251fc4fbecbd49f02dba1",
+            "timestamp": 1790821266
+          },
+          "his_price": "0.08",
+          "our_price": "0.07",
+          "cent_gap": "-1.00",
+          "realized_pnl_usd": "0",
+          "unrealized_pnl_usd": null,
+          "decision_latency_seconds": 1.428,
+          "copied_sell": false,
+          "rule_skipped": false,
+          "price_note": null
+        },
+        {
+          "window": 1,
+          "action": "SKIP",
+          "reason": "his_size_exceeds_cash",
+          "his_trade": {
+            "side": "BUY",
+            "slug": "btc-updown-5m-1790821200",
+            "outcome": "Up",
+            "size": "166.66",
+            "price": "0.68",
+            "transaction": "0x7190d3967066b88ce9c09642fe76ca1040b6dac9469573e6fa798305619dd61d",
+            "timestamp": 1790821352
+          },
+          "his_price": "0.68",
+          "our_price": "0.54",
+          "cent_gap": "-14.00",
+          "realized_pnl_usd": "0",
+          "unrealized_pnl_usd": null,
+          "decision_latency_seconds": 0.488,
+          "copied_sell": false,
+          "rule_skipped": true,
+          "price_note": null
+        }
+      ],
+      "cash_usd": "0.39928225",
+      "realized_pnl_usd": "-10.61788775",
+      "unrealized_pnl_usd": "-1.88214"
+    }
+  ]
+}
