@@ -6329,5 +6329,80 @@
         "unrealized_pnl_usd": "-11.32834"
       }
     ]
+  },
+  "continued_again_from_92_51245146": {
+    "reset_this_run": false,
+    "rule_changed_this_run": false,
+    "log": "measurements/paperc-fresh10-2026-10-01.jsonl",
+    "result": "measurements/paperc-fresh10-result.json",
+    "resumed_cash_usd": "92.51245146",
+    "resumed_realized_pnl_usd": "65.63230146",
+    "resumed_unrealized_pnl_usd": "-11.80428",
+    "resumed_equity_usd": "92.82802146",
+    "resumed_equity_reached_78": true,
+    "open_positions_at_resume": [
+      {
+        "slug": "bitcoin-up-or-down-september-30-2026-11pm-et",
+        "outcome": "Down",
+        "shares": "50.0",
+        "cost_usd": "12.11985"
+      }
+    ],
+    "resolution": {
+      "slug": "bitcoin-up-or-down-september-30-2026-11pm-et",
+      "published": false,
+      "note": "Gamma umaResolutionStatus was unset and closed was false through the sample, so the position stayed open. Live outcome prices were not used as a payout."
+    },
+    "ending_cash_usd": "92.51245146",
+    "realized_pnl_usd": "65.63230146",
+    "unrealized_pnl_usd": null,
+    "equity_usd": null,
+    "sample_end_quote": "stale_or_future_book",
+    "last_quotable_unrealized_pnl_usd": "-12.02684",
+    "last_quotable_equity_usd": "92.60546146",
+    "last_quotable_note": "End of window 1. The sample-end book was stale, so unrealized P/L and equity were left unset.",
+    "equity_reached_78": true,
+    "goal_reached": true,
+    "positions": [
+      {
+        "slug": "bitcoin-up-or-down-september-30-2026-11pm-et",
+        "outcome": "Down",
+        "shares": "50.0",
+        "cost_usd": "12.11985",
+        "unresolved_reason": "stale_or_future_book"
+      }
+    ],
+    "sells": 0,
+    "closes": [],
+    "decision_latency_seconds": [],
+    "windows": [
+      {
+        "window": 1,
+        "trades": 0,
+        "note": "No trade in this window.",
+        "his_trades": [],
+        "cash_usd": "92.51245146",
+        "realized_pnl_usd": "65.63230146",
+        "unrealized_pnl_usd": "-12.02684"
+      },
+      {
+        "window": 2,
+        "trades": 0,
+        "note": "No trade in this window.",
+        "his_trades": [],
+        "cash_usd": "92.51245146",
+        "realized_pnl_usd": "65.63230146",
+        "unrealized_pnl_usd": null
+      },
+      {
+        "window": 3,
+        "trades": 0,
+        "note": "No trade in this window.",
+        "his_trades": [],
+        "cash_usd": "92.51245146",
+        "realized_pnl_usd": "65.63230146",
+        "unrealized_pnl_usd": null
+      }
+    ]
   }
 }
