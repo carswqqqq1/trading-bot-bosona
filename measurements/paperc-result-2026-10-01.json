@@ -6404,5 +6404,457 @@
         "unrealized_pnl_usd": null
       }
     ]
+  },
+  "continued_third_from_92_51245146": {
+    "reset_this_run": false,
+    "rule_changed_this_run": false,
+    "log": "measurements/paperc-fresh11-2026-10-01.jsonl",
+    "result": "measurements/paperc-fresh11-result.json",
+    "resumed_cash_usd": "92.51245146",
+    "resumed_realized_pnl_usd": "65.63230146",
+    "resumed_unrealized_pnl_usd": null,
+    "resumed_equity_note": "The hourly book was not quoted at resume, so unrealized P/L was left unset. The resumed equity of 92.51245146 is cash only.",
+    "open_positions_at_resume": [
+      {
+        "slug": "bitcoin-up-or-down-september-30-2026-11pm-et",
+        "outcome": "Down",
+        "shares": "50.0",
+        "cost_usd": "12.11985"
+      }
+    ],
+    "resolution": {
+      "slug": "bitcoin-up-or-down-september-30-2026-11pm-et",
+      "published": false,
+      "umaResolutionStatus": "proposed",
+      "closed": false,
+      "note": "Proposed is not a published resolution. The position stayed open. Live outcome prices were not used as a payout."
+    },
+    "ending_cash_usd": "72.82406356",
+    "realized_pnl_usd": "65.63230146",
+    "unrealized_pnl_usd": null,
+    "equity_usd": null,
+    "cash_plus_quoted_15m_liquidation_usd": "86.62257356",
+    "equity_note": "The hourly book was stale and the 5-minute book was near expiry, so unrealized P/L and a full equity quote were left unset. Cash plus the 15-minute liquidation quote is 86.62257356, so equity stays above $78.",
+    "equity_reached_78": true,
+    "goal_reached": true,
+    "positions": [
+      {
+        "slug": "bitcoin-up-or-down-september-30-2026-11pm-et",
+        "outcome": "Down",
+        "shares": "50.0",
+        "cost_usd": "12.11985",
+        "unresolved_reason": "stale_or_future_book"
+      },
+      {
+        "slug": "btc-updown-15m-1790827200",
+        "outcome": "Up",
+        "shares": "23.66",
+        "cost_usd": "12.24405",
+        "liquidation_quote_usd": "13.79851"
+      },
+      {
+        "slug": "btc-updown-5m-1790827200",
+        "outcome": "Down",
+        "shares": "139.603158",
+        "cost_usd": "7.44433790",
+        "unresolved_reason": "market_not_started_or_near_expiry"
+      }
+    ],
+    "sells": 0,
+    "closes": [],
+    "decision_latency_seconds": [
+      {
+        "window": 1,
+        "side": "BUY",
+        "slug": "btc-updown-15m-1790827200",
+        "action": "SKIP",
+        "reason": "below_market_minimum",
+        "his_price": "0.5",
+        "our_price": null,
+        "cent_gap": null,
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 2.425
+      },
+      {
+        "window": 1,
+        "side": "BUY",
+        "slug": "bitcoin-up-or-down-october-1-2026-12am-et",
+        "action": "SKIP",
+        "reason": "latency_worse_than_leader_price",
+        "his_price": "0.5",
+        "our_price": "0.52",
+        "cent_gap": "2.00",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 2.671
+      },
+      {
+        "window": 1,
+        "side": "BUY",
+        "slug": "btc-updown-15m-1790827200",
+        "action": "SKIP",
+        "reason": "latency_worse_than_leader_price",
+        "his_price": "0.5",
+        "our_price": "0.51",
+        "cent_gap": "1.00",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 2.869
+      },
+      {
+        "window": 1,
+        "side": "BUY",
+        "slug": "btc-updown-15m-1790827200",
+        "action": "PAPER_BUY",
+        "reason": null,
+        "his_price": "0.5",
+        "our_price": "0.5",
+        "cent_gap": "0.0",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 2.403
+      },
+      {
+        "window": 1,
+        "side": "BUY",
+        "slug": "btc-updown-15m-1790827200",
+        "action": "PAPER_BUY",
+        "reason": null,
+        "his_price": "0.5",
+        "our_price": "0.5",
+        "cent_gap": "0.0",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 2.783
+      },
+      {
+        "window": 2,
+        "side": "BUY",
+        "slug": "btc-updown-5m-1790827200",
+        "action": "SKIP",
+        "reason": "his_size_exceeds_cash",
+        "his_price": "0.58",
+        "our_price": "0.4947811244979919678714859438",
+        "cent_gap": "-8.521887550200803212851405620",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 1.443
+      },
+      {
+        "window": 3,
+        "side": "BUY",
+        "slug": "btc-updown-5m-1790827200",
+        "action": "PAPER_BUY",
+        "reason": null,
+        "his_price": "0.8100000038",
+        "our_price": "0.05",
+        "cent_gap": "-76.0000003800",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 3.394
+      },
+      {
+        "window": 3,
+        "side": "BUY",
+        "slug": "btc-updown-5m-1790827200",
+        "action": "PAPER_BUY",
+        "reason": null,
+        "his_price": "0.81",
+        "our_price": "0.05",
+        "cent_gap": "-76.00",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 3.78
+      },
+      {
+        "window": 3,
+        "side": "BUY",
+        "slug": "btc-updown-5m-1790827500",
+        "action": "SKIP",
+        "reason": "latency_worse_than_leader_price",
+        "his_price": "0.5400000077",
+        "our_price": "0.56",
+        "cent_gap": "1.9999992300",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 1.443
+      },
+      {
+        "window": 3,
+        "side": "BUY",
+        "slug": "btc-updown-5m-1790827500",
+        "action": "SKIP",
+        "reason": "latency_worse_than_leader_price",
+        "his_price": "0.5400000496",
+        "our_price": "0.56",
+        "cent_gap": "1.9999950400",
+        "realized_pnl_usd": "0",
+        "unrealized_pnl_usd": null,
+        "latency_seconds": 1.637
+      }
+    ],
+    "windows": [
+      {
+        "window": 1,
+        "trades": 5,
+        "note": null,
+        "his_trades": [
+          {
+            "window": 1,
+            "action": "SKIP",
+            "reason": "below_market_minimum",
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-15m-1790827200",
+              "outcome": "Up",
+              "size": "2.02",
+              "price": "0.5",
+              "transaction": "0xbcbee6fa26e50acc08da002b21a48d5b813c4f49d8e3283d19971326d7e1b03e",
+              "timestamp": 1790827205
+            },
+            "his_price": "0.5",
+            "our_price": null,
+            "cent_gap": null,
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 2.425,
+            "copied_sell": false,
+            "rule_skipped": true,
+            "price_note": "No paper fill, so there is no our price and no cent gap."
+          },
+          {
+            "window": 1,
+            "action": "SKIP",
+            "reason": "latency_worse_than_leader_price",
+            "his_trade": {
+              "side": "BUY",
+              "slug": "bitcoin-up-or-down-october-1-2026-12am-et",
+              "outcome": "Up",
+              "size": "37.0",
+              "price": "0.5",
+              "transaction": "0x493ce19518de3abd1f41fbc29276b41b07b95b29b572a1a186f43b07d3d4f0d7",
+              "timestamp": 1790827205
+            },
+            "his_price": "0.5",
+            "our_price": "0.52",
+            "cent_gap": "2.00",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 2.671,
+            "copied_sell": false,
+            "rule_skipped": true,
+            "price_note": null
+          },
+          {
+            "window": 1,
+            "action": "SKIP",
+            "reason": "latency_worse_than_leader_price",
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-15m-1790827200",
+              "outcome": "Up",
+              "size": "24.0",
+              "price": "0.5",
+              "transaction": "0x97f3896c7c413fb0cc1fc89affe0685b6ef6d3974477454928d9bb51f129b987",
+              "timestamp": 1790827205
+            },
+            "his_price": "0.5",
+            "our_price": "0.51",
+            "cent_gap": "1.00",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 2.869,
+            "copied_sell": false,
+            "rule_skipped": true,
+            "price_note": null
+          },
+          {
+            "window": 1,
+            "action": "PAPER_BUY",
+            "reason": null,
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-15m-1790827200",
+              "outcome": "Up",
+              "size": "17.66",
+              "price": "0.5",
+              "transaction": "0x6a9d0a24830fef1467e722e8f43b137d6f7e35b7f261c3e5e6b9cd085a159a80",
+              "timestamp": 1790827206
+            },
+            "his_price": "0.5",
+            "our_price": "0.5",
+            "cent_gap": "0.0",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 2.403,
+            "copied_sell": false,
+            "rule_skipped": false,
+            "price_note": null
+          },
+          {
+            "window": 1,
+            "action": "PAPER_BUY",
+            "reason": null,
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-15m-1790827200",
+              "outcome": "Up",
+              "size": "6.0",
+              "price": "0.5",
+              "transaction": "0x3916aecfcee9cf38153516f3f0e0452d838d57c473bfc06fb64ce0e36fcaeda2",
+              "timestamp": 1790827206
+            },
+            "his_price": "0.5",
+            "our_price": "0.5",
+            "cent_gap": "0.0",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 2.783,
+            "copied_sell": false,
+            "rule_skipped": false,
+            "price_note": null
+          }
+        ],
+        "cash_usd": "80.26840146",
+        "realized_pnl_usd": "65.63230146",
+        "unrealized_pnl_usd": null
+      },
+      {
+        "window": 2,
+        "trades": 1,
+        "note": null,
+        "his_trades": [
+          {
+            "window": 2,
+            "action": "SKIP",
+            "reason": "his_size_exceeds_cash",
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-5m-1790827200",
+              "outcome": "Up",
+              "size": "249.0",
+              "price": "0.58",
+              "transaction": "0x9dd1fa1212bf7cfd5a0379c9714d9abd635d0745b69c03bdcc6a8ca4f5bfed69",
+              "timestamp": 1790827326
+            },
+            "his_price": "0.58",
+            "our_price": "0.4947811244979919678714859438",
+            "cent_gap": "-8.521887550200803212851405620",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 1.443,
+            "copied_sell": false,
+            "rule_skipped": true,
+            "price_note": null
+          }
+        ],
+        "cash_usd": "80.26840146",
+        "realized_pnl_usd": "65.63230146",
+        "unrealized_pnl_usd": null
+      },
+      {
+        "window": 3,
+        "trades": 4,
+        "note": null,
+        "his_trades": [
+          {
+            "window": 3,
+            "action": "PAPER_BUY",
+            "reason": null,
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-5m-1790827200",
+              "outcome": "Down",
+              "size": "5.263158",
+              "price": "0.8100000038",
+              "transaction": "0x2e97717fedd4ccd92845bb6e0c3efeb9afd9969f17241d4c17c6f71ceda6ffa2",
+              "timestamp": 1790827458
+            },
+            "his_price": "0.8100000038",
+            "our_price": "0.05",
+            "cent_gap": "-76.0000003800",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 3.394,
+            "copied_sell": false,
+            "rule_skipped": false,
+            "price_note": null
+          },
+          {
+            "window": 3,
+            "action": "PAPER_BUY",
+            "reason": null,
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-5m-1790827200",
+              "outcome": "Down",
+              "size": "134.34",
+              "price": "0.81",
+              "transaction": "0xd8265a827a56da50ae435f611a433f77d04158d59990268482cbaf3a10530920",
+              "timestamp": 1790827458
+            },
+            "his_price": "0.81",
+            "our_price": "0.05",
+            "cent_gap": "-76.00",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 3.78,
+            "copied_sell": false,
+            "rule_skipped": false,
+            "price_note": null
+          },
+          {
+            "window": 3,
+            "action": "SKIP",
+            "reason": "latency_worse_than_leader_price",
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-5m-1790827500",
+              "outcome": "Up",
+              "size": "54.347827",
+              "price": "0.5400000077",
+              "transaction": "0x7c06a8c3d2be82142f9eb2f9c5fb809bf9a5918c5e515d8d8cabe9a6068a25a6",
+              "timestamp": 1790827505
+            },
+            "his_price": "0.5400000077",
+            "our_price": "0.56",
+            "cent_gap": "1.9999992300",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 1.443,
+            "copied_sell": false,
+            "rule_skipped": true,
+            "price_note": null
+          },
+          {
+            "window": 3,
+            "action": "SKIP",
+            "reason": "latency_worse_than_leader_price",
+            "his_trade": {
+              "side": "BUY",
+              "slug": "btc-updown-5m-1790827500",
+              "outcome": "Up",
+              "size": "5.239131",
+              "price": "0.5400000496",
+              "transaction": "0x223ccdbfd25fae19d4e2c0671f3ecddcdb4ff151364d28a05898a7b1b534a05e",
+              "timestamp": 1790827505
+            },
+            "his_price": "0.5400000496",
+            "our_price": "0.56",
+            "cent_gap": "1.9999950400",
+            "realized_pnl_usd": "0",
+            "unrealized_pnl_usd": null,
+            "decision_latency_seconds": 1.637,
+            "copied_sell": false,
+            "rule_skipped": true,
+            "price_note": null
+          }
+        ],
+        "cash_usd": "72.82406356",
+        "realized_pnl_usd": "65.63230146",
+        "unrealized_pnl_usd": null
+      }
+    ]
   }
 }

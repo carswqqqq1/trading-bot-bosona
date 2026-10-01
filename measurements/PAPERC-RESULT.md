@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), [the following log](paperc-fresh8-2026-10-01.jsonl), [the next log](paperc-fresh9-2026-10-01.jsonl), [the following log](paperc-fresh10-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), [the following log](paperc-fresh8-2026-10-01.jsonl), [the next log](paperc-fresh9-2026-10-01.jsonl), [the following log](paperc-fresh10-2026-10-01.jsonl), [the next log](paperc-fresh11-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -513,3 +513,37 @@ At resume the bid quote marked unrealized P/L at -$11.80428 and equity at $92.82
 | Equity reached $78 | yes |
 
 There was no fill of his in these windows, so there is no fill-to-action latency.
+
+## Continued from $92.51245146 a third time
+
+The book was not reset and no rule was changed. The run resumed at cash $92.51245146 with 50 Down shares of `bitcoin-up-or-down-september-30-2026-11pm-et` still open, cost $12.11985. Cumulative realized P/L was $65.63230146. [Log](paperc-fresh11-2026-10-01.jsonl).
+
+The hourly market had no published resolution. Gamma `umaResolutionStatus` was `proposed` and `closed` was false, so the paper position stayed open. Live outcome prices were not used as a payout.
+
+No position closed. Four buys copied his exact share count at a full-size price at or below his price. No same-minute sell printed.
+
+| Buy | Shares | His price | Our price | Gross | Fee | Cash after | Latency (seconds) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Up `btc-updown-15m-1790827200` | 17.66 | 0.5 | 0.5 | 8.830 | 0.30905 | 83.37340146 | 2.403 |
+| Up `btc-updown-15m-1790827200` | 6 | 0.5 | 0.5 | 3.00 | 0.10500 | 80.26840146 | 2.783 |
+| Down `btc-updown-5m-1790827200` | 5.263158 | 0.8100000038 | 0.05 | 0.26315790 | 0.01750 | 79.98774356 | 3.394 |
+| Down `btc-updown-5m-1790827200` | 134.34 | 0.81 | 0.05 | 6.7170 | 0.44668 | 72.82406356 | 3.78 |
+
+The sample-end book could not mark every position. The hourly book was stale, and the 5-minute book was near expiry. Those gaps were not used as prices. The 15-minute position had a liquidation quote of $13.79851.
+
+| Open position | Shares | Cost | Liquidation quote |
+| --- | ---: | ---: | ---: |
+| Down `bitcoin-up-or-down-september-30-2026-11pm-et` | 50 | 12.11985 | not quoted; stale book |
+| Up `btc-updown-15m-1790827200` | 23.66 | 12.24405 | 13.79851 |
+| Down `btc-updown-5m-1790827200` | 139.603158 | 7.44433790 | not quoted; near expiry |
+
+| | USD |
+| --- | ---: |
+| Ending cash | 72.82406356 |
+| Realized P/L | 65.63230146 |
+| Unrealized P/L | not quoted |
+| Equity | not quoted |
+| Cash plus the 15-minute quote | 86.62257356 |
+| Equity reached $78 | yes; that sum is already above $78, and the other open shares are not a cash liability |
+
+Latency in seconds from his fill to each paper action: 2.425, 2.671, 2.869, 2.403, 2.783, 1.443, 3.394, 3.78, 1.443, 1.637.
