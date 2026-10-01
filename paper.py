@@ -783,7 +783,11 @@ def trade_timestamp_seconds(value):
 
 
 def trade_fingerprint(row):
-    """Stable id for one fill from either the REST feed or the public trade stream."""
+    """Stable id for one fill from either the REST feed or the public trade stream.
+
+    The two feeds can stamp the same fill one second apart. The transaction,
+    token, side, size, and price identify it. The second is not part of the id.
+    """
     size = D(str(row.get('size'))).quantize(Decimal('0.00000001'))
     price = D(str(row.get('price'))).quantize(Decimal('0.000001'))
     wallet = row.get('proxy_wallet') or row.get('proxyWallet') or ''
@@ -792,8 +796,7 @@ def trade_fingerprint(row):
     token = row.get('token_id') or row.get('asset') or ''
     identity = '|'.join([
         str(wallet).lower(), str(transaction).lower(), str(condition).lower(), str(token),
-        str(trade_timestamp_seconds(row.get('timestamp'))), str(row.get('side') or '').upper(),
-        format(size, 'f'), format(price, 'f'),
+        str(row.get('side') or '').upper(), format(size, 'f'), format(price, 'f'),
     ])
     return hashlib.sha256(identity.encode()).hexdigest()
 

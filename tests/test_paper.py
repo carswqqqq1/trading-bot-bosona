@@ -689,6 +689,10 @@ class PaperCTests(unittest.TestCase):
         streamed = paper.live_trade_row(payload)
         self.assertEqual(streamed["timestamp"], NOW - 1)
         self.assertEqual(paper.trade_fingerprint(rest), paper.trade_fingerprint(streamed))
+        later = dict(streamed, timestamp=streamed["timestamp"] + 1, price="0.5300004")
+        self.assertEqual(paper.trade_fingerprint(rest), paper.trade_fingerprint(later))
+        other = dict(streamed, transaction_hash="0xother")
+        self.assertNotEqual(paper.trade_fingerprint(rest), paper.trade_fingerprint(other))
         self.assertEqual(paper.trade_timestamp_seconds((NOW - 1) * 1_000_000), NOW - 1)
 
     def test_websocket_frames_split_without_a_socket(self):
