@@ -15,8 +15,9 @@ one burst cannot spend the whole account. These rules do not guarantee a profit.
 strategy "paper_c" is a separate filter. A sell is copied only when it
 closes an existing paper position above paper cost. With no matching position
 the sell is skipped when it appears. copy_buys_at_or_better copies his buy on
-the same side and market, for the same number of shares, only when the book
-fills that size at his price or better. The market minimum is still 5 shares.
+the same side and market, for the same number of shares, only when that full
+size fills at his price or better. A better full-size price is a copy. A
+5-share quote is not that price. The market minimum is still 5 shares.
 If that size costs more than the cash on hand, the buy is skipped and is not
 scaled down. Decision latency is his fill timestamp to that copy or skip. The
 paper48 path is unchanged.
@@ -343,18 +344,18 @@ class PaperJournal:
                         position['cost'] = ZERO
                     decision['realized_pnl_usd'] = str(net-removed_cost)
                 elif row['side']=='BUY' and self.config.get('strategy')=='paper_c' and self.config.get('copy_buys_at_or_better'):
-                    # His exact share count. Never a smaller clip. Cash that cannot
-                    # cover that size skips the buy.
+                    # His exact share count. The price is the full-size book VWAP.
+                    # A better VWAP copies. A cap at his tick used to drop that
+                    # size and report the 5-share price instead. Cash that cannot
+                    # cover the full size skips the buy and does not scale it down.
                     quantity = source_shares
                     if quantity < max(minimum, FIVE):
                         raise ValueError('below_market_minimum')
-                    limit = (source_price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
-                    if limit <= 0:
-                        raise ValueError('invalid_source_price')
                     try:
-                        fill = quote(book,'BUY',quantity,rate,limit)
+                        fill = quote(book,'BUY',quantity,rate)
                     except ValueError:
-                        raise ValueError('his_size_not_at_or_better_than_his_price')
+                        raise ValueError('his_size_not_on_the_book')
+                    decision['simulated_vwap'] = str(fill['vwap'])
                     if fill['vwap'] > source_price:
                         raise ValueError('latency_worse_than_leader_price')
                     debit = fill['gross']+fill['fee']
@@ -407,7 +408,9 @@ class PaperJournal:
                 decision['reason'] = str(exc)
             decision['rule_skipped'] = decision['status'] == 'SKIP'
             our_price = decision.get('simulated_vwap')
-            if our_price is None:
+            exact_size_buy = (self.config.get('strategy')=='paper_c'
+                              and self.config.get('copy_buys_at_or_better') and row['side']=='BUY')
+            if our_price is None and not exact_size_buy:
                 our_price = (decision.get('minimum_size_price_comparison') or {}).get('snapshot_vwap')
             if our_price is not None and decision.get('source_price') is not None:
                 decision['our_price'] = str(our_price)

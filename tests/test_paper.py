@@ -366,8 +366,47 @@ class PaperCTests(unittest.TestCase):
             book(asks=[{"price": "0.51", "size": "100"}], bids=[{"price": "0.49", "size": "100"}]), NOW,
         )
         self.assertEqual(late["status"], "SKIP")
-        self.assertEqual(late["reason"], "his_size_not_at_or_better_than_his_price")
+        self.assertEqual(late["reason"], "latency_worse_than_leader_price")
+        self.assertEqual(late["our_price"], "0.51")
         self.assertEqual(journal.cash + journal.holdings()[TOKEN_UP]["cost"], Decimal("39"))
+
+    def test_better_full_size_price_copies_his_exact_share_count(self):
+        journal = self.journal(copy_buys_at_or_better=True)
+        asks = [{"price": "0.07", "size": "270"}, {"price": "0.09", "size": "100"}]
+        copied = journal.process(
+            "buy-better",
+            row(price="0.08", size="275.48695"),
+            market(),
+            book(tick_size="0.001", min_order_size="5", asks=asks, bids=[{"price": "0.06", "size": "100"}]),
+            NOW,
+        )
+        self.assertEqual(copied["status"], "PAPER_BUY")
+        self.assertEqual(Decimal(copied["shares"]), Decimal("275.48695"))
+        self.assertLess(Decimal(copied["simulated_vwap"]), Decimal("0.08"))
+        self.assertEqual(copied["our_price"], copied["simulated_vwap"])
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("275.48695"))
+        self.assertEqual(journal.cash + journal.holdings()[TOKEN_UP]["cost"], Decimal("39"))
+        touched = journal.process(
+            "buy-touch",
+            row(price="0.08", size="275.48695", transaction_hash="0xtouch"),
+            market(),
+            book(tick_size="0.001", asks=[{"price": "0.07", "size": "1000"}], bids=[{"price": "0.06", "size": "10"}]),
+            NOW,
+        )
+        self.assertEqual(touched["status"], "SKIP")
+        self.assertEqual(touched["reason"], "his_size_exceeds_cash")
+        self.assertEqual(touched["our_price"], "0.07")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("275.48695"))
+        thin = self.journal(copy_buys_at_or_better=True).process(
+            "buy-thin",
+            row(price="0.08", size="275.48695", transaction_hash="0xthin"),
+            market(),
+            book(asks=[{"price": "0.07", "size": "5"}], bids=[{"price": "0.06", "size": "5"}]),
+            NOW,
+        )
+        self.assertEqual(thin["status"], "SKIP")
+        self.assertEqual(thin["reason"], "his_size_not_on_the_book")
+        self.assertIsNone(thin["our_price"])
 
     def test_sell_without_a_position_stays_skipped_after_the_buy_rule(self):
         journal = self.journal(copy_buys_at_or_better=True)
