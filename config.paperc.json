@@ -14,5 +14,6 @@
   "max_open_cost_usd": "38",
   "max_outcome_cost_usd": "5.00",
   "max_book_age_seconds": 5,
-  "strategy": "paper_c"
+  "strategy": "paper_c",
+  "copy_buys_at_or_better": true
 }

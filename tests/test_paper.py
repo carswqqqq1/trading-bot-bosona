@@ -342,6 +342,37 @@ class PaperCTests(unittest.TestCase):
         self.assertEqual(journal.cash, Decimal("39"))
         self.assertEqual(sum((p["shares"] for p in journal.holdings().values()), Decimal(0)), 0)
 
+    def test_buy_at_his_price_or_better_stays_inside_cash(self):
+        journal = self.journal(copy_buys_at_or_better=True)
+        copied = journal.process("buy-ok", row(price="0.50"), market(), book(), NOW)
+        self.assertEqual(copied["status"], "PAPER_BUY")
+        self.assertEqual(copied["side"], "BUY")
+        self.assertEqual(copied["slug"], row()["slug"])
+        self.assertLessEqual(Decimal(copied["simulated_vwap"]), Decimal(copied["his_price"]))
+        self.assertGreater(Decimal(copied["decision_latency_seconds"]), 0)
+        cost = journal.holdings()[TOKEN_UP]["cost"]
+        self.assertGreater(cost, 0)
+        self.assertLessEqual(cost, Decimal("39"))
+        self.assertGreaterEqual(journal.cash, 0)
+        self.assertEqual(journal.cash + cost, Decimal("39"))
+        late = journal.process(
+            "buy-late", row(transaction_hash="0xlate", price="0.50"), market(),
+            book(asks=[{"price": "0.51", "size": "100"}], bids=[{"price": "0.49", "size": "100"}]), NOW,
+        )
+        self.assertEqual(late["status"], "SKIP")
+        self.assertEqual(late["reason"], "latency_worse_than_leader_price")
+        self.assertEqual(journal.cash + journal.holdings()[TOKEN_UP]["cost"], Decimal("39"))
+
+    def test_sell_without_a_position_stays_skipped_after_the_buy_rule(self):
+        journal = self.journal(copy_buys_at_or_better=True)
+        result = journal.process(
+            "sell-flat", row(side="SELL", price="0.90", transaction_hash="0xs"),
+            None, None, NOW, skip_reason="no_matching_paper_position",
+        )
+        self.assertEqual(result["reason"], "no_matching_paper_position")
+        self.assertEqual(journal.cash, Decimal("39"))
+        self.assertEqual(sum((p["shares"] for p in journal.holdings().values()), Decimal(0)), 0)
+
     def test_sell_without_a_position_is_skipped_even_when_the_bid_is_rich(self):
         journal = self.journal()
         result = journal.process(

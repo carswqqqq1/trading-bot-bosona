@@ -12,9 +12,10 @@ same window when the bid is above its average cost and the sale nets a gain.
 Open cost stays under max_open_cost_usd, which is below the cash balance, so
 one burst cannot spend the whole account. These rules do not guarantee a profit.
 
-strategy "paper_c" is a separate filter. It never opens a buy. It copies a
-sell only when that sell closes an existing paper position above paper cost.
-A trade with no matching paper position is skipped at the moment it appears.
+strategy "paper_c" is a separate filter. A sell is copied only when it
+closes an existing paper position above paper cost. With no matching position
+the sell is skipped when it appears. copy_buys_at_or_better is the one rule
+change: his buy, his market, at his price or better, and only inside the cash.
 Decision latency is his fill timestamp to that copy or skip. The paper48 path
 is unchanged.
 """
@@ -247,9 +248,13 @@ class PaperJournal:
             try:
                 if skip_reason:
                     raise ValueError(skip_reason)
-                # Paper C can refuse a buy, or a sell with nothing open, before any book read.
-                if self.config.get('strategy')=='paper_c' and (row['side']=='BUY' or position['shares']<=0):
-                    raise ValueError('paper_c_no_new_buys' if row['side']=='BUY' else 'no_matching_paper_position')
+                # A sell with nothing open is skipped before any book read.
+                # Buys stay closed unless the one rule change, copy_buys_at_or_better, is on.
+                if self.config.get('strategy')=='paper_c' and row['side']=='SELL' and position['shares']<=0:
+                    raise ValueError('no_matching_paper_position')
+                if (self.config.get('strategy')=='paper_c' and row['side']=='BUY'
+                        and not self.config.get('copy_buys_at_or_better')):
+                    raise ValueError('paper_c_no_new_buys')
                 reason = market_check(row,market,book,self.config,now)
                 if reason:
                     raise ValueError(reason)
@@ -276,7 +281,7 @@ class PaperJournal:
                         interpretation='Hypothetical minimum-size quote, not an account fill or causal latency estimate.')
                 except ValueError:
                     pass
-                if self.config.get('strategy')=='paper_c':
+                if self.config.get('strategy')=='paper_c' and row['side']=='SELL':
                     # His sell, his market, and only a close that nets a gain above paper cost.
                     quantity = position['shares'].quantize(STEP,rounding=ROUND_DOWN)
                     cost_per = position['cost']/position['shares']
@@ -317,7 +322,7 @@ class PaperJournal:
                         raise ValueError('unmatched_source_sell_baseline_inventory_unknown')
                     quantity = (position['shares']*source_shares/leader_before).quantize(STEP,rounding=ROUND_DOWN)
                     limit = max(ZERO,source_price-drift)
-                if self.config.get('strategy')!='paper_c':
+                if not (self.config.get('strategy')=='paper_c' and row['side']=='SELL'):
                     if quantity < minimum or quantity <= 0:
                         raise ValueError('below_market_minimum_or_budget_cap')
                     fill = quote(book,row['side'],quantity,rate,limit)
@@ -357,10 +362,7 @@ class PaperJournal:
             elif decision.get('status')=='SKIP':
                 decision['our_price'] = None
                 decision['cent_gap'] = None
-            if self.config.get('strategy')=='paper_c' and decision.get('status')=='SKIP':
-                # A skip is not a fill. Leave his price, and do not invent ours.
-                decision['our_price'] = None
-                decision['cent_gap'] = None
+            if self.config.get('strategy')=='paper_c' and decision.get('status')=='SKIP' and decision.get('our_price') is None:
                 decision['price_note'] = 'No paper fill, so there is no our price and no cent gap.'
             held_after = sum((p['shares'] for tok,p in positions.items() if tok!=token),ZERO)+position['shares']
             if held_after==0:
@@ -573,7 +575,11 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                                                skip_reason='resume_backlog_not_copied')
                                 else:
                                     held = journal.holdings().get(str(row['token_id']))
-                                    needs_book = row['side']=='SELL' and held and held['shares']>0
+                                    sell_can_close = row['side']=='SELL' and held and held['shares']>0
+                                    # A buy needs the book the moment it appears, to see if
+                                    # the ask is at his price or better. A sell with no
+                                    # position is still skipped before that read.
+                                    needs_book = sell_can_close or (row['side']=='BUY' and config.get('copy_buys_at_or_better'))
                                     if needs_book:
                                         market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'],safe=''))
                                         book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':row['token_id']})
@@ -607,7 +613,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                      open_cost_usd=port['open_cost_usd'],paper=True,executed=False)
                 windows.append(window_record)
                 emit(window_record)
-                if rule_reset is None and steadily_losing(equity_samples):
+                # The buy rule is already the one change. Do not change another if this sample is flat or losing.
+                if rule_reset is None and not config.get('copy_buys_at_or_better') and steadily_losing(equity_samples):
                     reset = journal.apply_one_rule_reset()
                     reset.update(window_after=window_index,equity_samples_usd=[str(sample) for sample in equity_samples])
                     rule_reset = reset
@@ -647,9 +654,16 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                                    unrealized_pnl_usd=view['unrealized_pnl_usd'],
                                                    latency_seconds=view['decision_latency_seconds'])
                                               for window in windows for view in window['decisions']],
-                    reset_to_39=rule_reset is not None,
-                    rule_changed=None if rule_reset is None else rule_reset['rule_changed'],
-                    rule_change_why=None if rule_reset is None else rule_reset['why'],
+                    reset_to_39=True if config.get('copy_buys_at_or_better') else rule_reset is not None,
+                    rule_changed=('copy_buys_at_or_better' if config.get('copy_buys_at_or_better')
+                                  else None if rule_reset is None else rule_reset['rule_changed']),
+                    rule_change_why=('The no-new-buys rule copied nothing, because a later sell cannot close a position that was never opened. '
+                                     'The one change allows his buy, same side and same market, at the moment the trade appears, '
+                                     'only when the book fills at his price or better and the open cost stays inside the $39 cash. '
+                                     'The sell rule is unchanged.'
+                                     if config.get('copy_buys_at_or_better')
+                                     else None if rule_reset is None else rule_reset['why']),
+                    second_rule_changed=False,
                     book_was_steadily_losing=rule_reset is not None,
                     goal_usd='78',goal_reached=goal_reached,poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
