@@ -657,6 +657,9 @@ class PaperJournal:
                     # so the position does not stay unmarked into a resolution.
                     if fill['vwap'] > cost_per - D(book['tick_size']):
                         return None
+                    opened_at = position.get('opened_at')
+                    if opened_at is None or now - float(opened_at) < 60:
+                        return None
                     net = fill['gross']-fill['fee']
                     reason = 'any_minute_bid_no_longer_above_paper_cost'
                     latency_note = ('The bid is more than one tick under paper cost, so the position '
@@ -1115,10 +1118,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     emit(dict(status='ERROR',message=str(exc)))
 
         rule_name = 'sell_any_minute_if_bid_above_cost' if config.get('sell_any_minute_if_bid_above_cost') else None
-        buy_filter = ('copy his exact share count, same side and market, only when the full size fills at his price or better and the debit does not spend closed profit; '
-                      'closed profit may buy five shares only when those five fill at his price or better; '
-                      'a full size whose ask has walked may buy five shares at his price or at most one tick worse; '
-                      'skip when that size is not on the book; do not copy at a worse price; '
+        buy_filter = ('copy five shares, same side and market, at his price or at most one tick worse; '
+                      'his full size is not copied, so closed profit is not left in an unmarked position; '
+                      'skip when five shares are not on the book or cost more than cash; '
                       'a new buy pays the taker fee in shares and a new sell pays it from USDC proceeds; '
                       'copy a sell he prints only when it closes an existing paper position above paper cost')
         if rule_name:

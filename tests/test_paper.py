@@ -714,6 +714,12 @@ class PaperCTests(unittest.TestCase):
         cheap = book(timestamp=(NOW + 60) * 1000, asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.41", "size": "100"}])
         self.assertIsNone(journal.realize_any_minute_if_bid_above_cost(market(), cheap, NOW + 60))
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal(bought["shares"]))
+        deep = book(timestamp=(NOW + 30) * 1000, asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.30", "size": "100"}])
+        self.assertIsNone(journal.realize_any_minute_if_bid_above_cost(market(), deep, NOW + 30))
+        later = book(timestamp=(NOW + 61) * 1000, asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.30", "size": "100"}])
+        sold = journal.realize_any_minute_if_bid_above_cost(market(), later, NOW + 61)
+        self.assertEqual(sold["reason"], "any_minute_bid_no_longer_above_paper_cost")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
 
     def test_fill_clock_is_kept_from_the_first_goal_run(self):
         journal = self.journal(copy_buys_at_or_better=True)
