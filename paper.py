@@ -46,6 +46,38 @@ def exit_in_entry_minute(source_timestamp, now):
     return 0 <= age <= 60
 
 
+def window_seconds_left(slug, market, now):
+    """Seconds until the traded window ends, from the slug or the in-hand market."""
+    ends = []
+    match = re.fullmatch(r'btc-updown-(5|15)m-(\d+)', slug or '')
+    if match:
+        ends.append(int(match[2]) + int(match[1]) * 60)
+    if isinstance(market, dict) and isinstance(market.get('endDate'), str):
+        try:
+            end = datetime.fromisoformat(market['endDate'].replace('Z', '+00:00'))
+        except ValueError:
+            end = None
+        if end is not None and end.tzinfo is not None:
+            ends.append(end.timestamp())
+    if not ends:
+        return None
+    return min(ends) - float(now)
+
+
+def loss_flatten_due(minute_age, seconds_left):
+    """Flatten at a loss while the entry minute and the in-hand book still exist.
+
+    A 5-minute window can end before second 58 of his fill. Waiting for that
+    second lets the book disappear, so the flatten also fires when the window
+    has 10 seconds left.
+    """
+    if minute_age is None or not 0 <= minute_age <= 60:
+        return False
+    if minute_age >= 58:
+        return True
+    return seconds_left is not None and seconds_left <= 10
+
+
 def exit_quote(position, market, book):
     """Preview a same-minute sell from the book already in hand.
 
@@ -695,9 +727,11 @@ def main():
                 if preview and preview.get('qualifies') and state['first_qualifying'] is None:
                     state['first_qualifying']=now
                 minute_age=now-int(source_ts) if source_ts is not None else None
-                # A gain sells immediately. If the bid still has not cleared cost
-                # as the entry minute ends, flatten at that bid even at a loss.
-                flatten_loss=not (preview and preview.get('qualifies')) and minute_age is not None and minute_age>=58
+                # A gain sells immediately. If the bid has not cleared cost by the
+                # end of the minute, or the window is about to take the book away,
+                # flatten at this in-hand bid even at a loss.
+                flatten_loss=(not (preview and preview.get('qualifies'))
+                              and loss_flatten_due(minute_age, window_seconds_left(position['row'].get('slug'), market, now)))
                 if not (preview and preview.get('qualifies')) and not flatten_loss:
                     continue
                 try:

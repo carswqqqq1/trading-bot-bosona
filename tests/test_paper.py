@@ -359,6 +359,23 @@ class PaperJournalTests(unittest.TestCase):
         self.assertEqual(Decimal(flattened["vwap"]), Decimal("0.40"))
 
 
+class LossFlattenTimingTests(unittest.TestCase):
+    def test_a_window_ending_inside_the_minute_flattens_before_second_58(self):
+        # His fill was 42 seconds before a 5-minute window ended. Second 58 is too late.
+        self.assertFalse(paper.loss_flatten_due(30, 40))
+        self.assertTrue(paper.loss_flatten_due(32, 10))
+        self.assertTrue(paper.loss_flatten_due(42, 0))
+        self.assertTrue(paper.loss_flatten_due(59, 100))
+        self.assertFalse(paper.loss_flatten_due(61, 0))
+        self.assertFalse(paper.loss_flatten_due(None, 0))
+
+    def test_window_seconds_left_uses_the_slug_end(self):
+        slug = "btc-updown-5m-1790827200"
+        now = 1790827458
+        left = paper.window_seconds_left(slug, {"endDate": "2026-10-01T04:05:00Z"}, now)
+        self.assertEqual(left, 42)
+
+
 class SettlementTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
