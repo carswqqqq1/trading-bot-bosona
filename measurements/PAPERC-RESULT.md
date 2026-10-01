@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -232,3 +232,31 @@ Those latencies are his opening fill to the paper sell. The sells are not sells 
 | Equity reached $78 | no |
 
 No position was left open. Latency in seconds from his fill to each paper action: 1.418, 2.531, 9.561, 1.403, 0.471, 0.664, 2.553, 2.744, 19.209, 2.428, 1.403, 6.522.
+
+## Continued from $39.34693948
+
+The book was not reset and no rule was changed. The run resumed at cash $39.34693948 with no open positions. A same-minute sell now reads the bid while his activity request is in flight, and it sells on the first book that clears paper cost. [Log](paperc-fresh2-2026-10-01.jsonl).
+
+| Close | Shares | Sell price | Cost | Realized | Cash after | Unrealized | Equity | Equity reached $78 | Latency (seconds) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| Up `btc-updown-15m-1790821800` | 31.45 | 0.12 | 3.34314 | 0.19838 | 39.54531948 | 0 | 39.54531948 | no | 11.315 |
+| Down `btc-updown-5m-1790822400` | 38.07 | 0.31 | 11.19684 | 0.03484 | 39.58015948 | 0 | 39.58015948 | no | 3.487 |
+| Up `btc-updown-15m-1790821800` | 6.67 | 0.15 | 0.84970 | 0.09127 | 39.67142948 | 0 | 39.67142948 | no | 6.169 |
+
+Those latencies are his opening fill to the paper sell.
+
+One position was still open at the sample end. Its market had not resolved, and the opening minute had passed, so it stayed open. The book quoted it.
+
+| Open position | Shares | Cost | Liquidation quote |
+| --- | ---: | ---: | ---: |
+| Up `btc-updown-5m-1790822400` | 40.19 | 26.82408 | 30.86544 |
+
+| | USD |
+| --- | ---: |
+| Ending cash | 12.84734948 |
+| Realized P/L | 0.67142948 |
+| Unrealized P/L | 4.04136 |
+| Equity | 43.71278948 |
+| Equity reached $78 | no |
+
+Latency in seconds from his fill to each paper action: 1.4, 1.429, 11.315, 1.422, 1.633, 2.509, 2.895, 3.487, 0.543, 0.941, 6.169, 1.406, 2.422.
