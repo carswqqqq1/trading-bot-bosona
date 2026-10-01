@@ -44,6 +44,42 @@ def exit_in_entry_minute(source_timestamp, now):
     return 0 <= age <= 60
 
 
+def exit_quote(position, market, book):
+    """Preview a same-minute sell from the book already in hand.
+
+    Fetch age is not a reason to wait. None means this book was not usable.
+    A result with qualifies False means the bid is not yet a gain.
+    """
+    if not position or book.get('market') != position['row'].get('condition_id'):
+        return None
+    try:
+        shares, cost = D(position['shares']), D(position['cost'])
+        if shares <= 0 or cost <= 0:
+            return None
+        rate = fee_rate(market)
+        minimum = D(book['min_order_size'])
+        if minimum <= 0:
+            return None
+        cost_per = cost / shares
+        bid_levels = levels(book, 'SELL')
+        best = bid_levels[0][0] if bid_levels else None
+        above = [level for level in bid_levels if level[0] > cost_per]
+        preview = dict(best_bid=best, cost_per=cost_per, bid_above_cost=bool(above), qualifies=False)
+        if not above:
+            return preview
+        available = sum((size for _, size in above), ZERO)
+        quantity = min(shares, available).quantize(STEP, rounding=ROUND_DOWN)
+        if quantity < minimum or quantity <= 0:
+            return preview
+        fill = quote(book, 'SELL', quantity, rate, cost_per)
+        removed = cost * quantity / shares
+        net = fill['gross'] - fill['fee']
+        preview['qualifies'] = net > removed
+        return preview
+    except (ValueError, KeyError, TypeError, ArithmeticError):
+        return None
+
+
 def fee_rate(market):
     if market.get('feesEnabled') is False:
         return ZERO
@@ -623,6 +659,7 @@ def main():
                 if position['shares'] > 0 and position['row'].get('slug'))
         publish_open()
         prefetcher.start()
+        exit_state={}
         def exit_scan():
             now = time.time()
             for token,position in list(journal.holdings().items()):
@@ -630,12 +667,28 @@ def main():
                     continue
                 if not exit_in_entry_minute(position['row'].get('timestamp'), now):
                     continue
-                # A same-minute sell uses the book already in hand. It does not GET,
-                # and it does not wait for the exchange timestamp to be under 5 seconds.
-                hit=quotes.take(token, position['row'].get('slug'), now, float(config['max_book_age_seconds']))
+                # A same-minute sell uses the book already in hand. It does not GET.
+                # Fetch age and the exchange timestamp are not sell gates, so a
+                # qualifying bid does not sit until a younger quote arrives.
+                source_ts=position['row'].get('timestamp')
+                state=exit_state.get(token)
+                if state is None or state['source_ts']!=source_ts:
+                    state=dict(source_ts=source_ts, first_above=None, first_qualifying=None,
+                               with_book=0, without_book=0)
+                    exit_state[token]=state
+                hit=quotes.take(token, position['row'].get('slug'), now, 10**9)
                 if not hit:
+                    state['without_book']+=1
                     continue
                 market, book, age = hit
+                state['with_book']+=1
+                preview=exit_quote(position, market, book)
+                if preview and preview.get('bid_above_cost') and state['first_above'] is None:
+                    state['first_above']=now
+                if preview and preview.get('qualifies') and state['first_qualifying'] is None:
+                    state['first_qualifying']=now
+                if not preview or not preview.get('qualifies'):
+                    continue
                 try:
                     exchange_age=now-float(book['timestamp'])/1000.0
                 except (TypeError, ValueError, KeyError):
@@ -643,13 +696,25 @@ def main():
                 try:
                     exited=journal.realize_if_bid_above_cost(market,book,now,in_hand=True)
                     if exited:
+                        unused=now-state['first_qualifying']
+                        if age>float(config['max_book_age_seconds']):
+                            unused=max(unused, age)
                         exited['quote_source']='prefetch'
                         exited['book_fetch_seconds']=0.0
                         exited['quote_age_seconds']=round(age, 3)
                         exited['remaining_wait_seconds']=round(age, 3)
                         if exchange_age is not None:
                             exited['book_exchange_timestamp_age_seconds']=round(exchange_age, 3)
-                        exited['wait_note']='In-hand quote. Remaining wait is the quote age. The exchange timestamp is not a sell gate.'
+                        if source_ts is not None and state['first_above'] is not None:
+                            exited['seconds_until_bid_above_cost']=round(state['first_above']-int(source_ts), 3)
+                        exited['unused_qualifying_seconds']=round(unused, 3)
+                        exited['scans_with_book']=state['with_book']
+                        exited['scans_without_book']=state['without_book']
+                        if unused>0.25:
+                            exited['gap_reason']='qualifying_bid_sat_unused'
+                        else:
+                            exited['gap_reason']='waiting_for_bid_above_cost'
+                        exited['wait_note']='In-hand quote. Remaining wait is the quote age. Fetch age and the exchange timestamp are not sell gates.'
                         emit(exited)
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))

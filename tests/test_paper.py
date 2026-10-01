@@ -327,6 +327,21 @@ class PaperJournalTests(unittest.TestCase):
         self.assertGreater(Decimal(exited["realized_pnl_usd"]), 0)
         self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"], 0)
         self.assertGreater(self.journal.cash, Decimal("48") - Decimal(bought["gross"]) - Decimal(bought["fee"]))
+        fresh = self.journal.process(
+            "buy-preview", row(transaction_hash="0xpreview", size="8"), market(), book(), NOW,
+        )
+        self.assertEqual(fresh["status"], "PAPER_BUY")
+        held = self.journal.holdings()[TOKEN_UP]
+        above = paper.exit_quote(
+            held, market(), book(timestamp=(NOW - 30) * 1000, bids=[{"price": "0.60", "size": "100"}]),
+        )
+        self.assertTrue(above["bid_above_cost"])
+        self.assertTrue(above["qualifies"])
+        below = paper.exit_quote(
+            held, market(), book(timestamp=NOW * 1000, bids=[{"price": "0.40", "size": "100"}]),
+        )
+        self.assertFalse(below["bid_above_cost"])
+        self.assertFalse(below["qualifies"])
         report = self.journal.portfolio(lambda url, params=None: market() if "/markets/slug/" in url else book(timestamp=NOW * 1000))
         self.assertGreater(Decimal(report["realized_pnl_usd"]), 0)
 
