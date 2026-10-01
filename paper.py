@@ -133,6 +133,14 @@ def quote(book, side, quantity, rate, limit=None):
 FIVE = Decimal('5')
 
 
+def paper_goal(config):
+    """Paper C target. Absent config keeps the earlier $78 mark."""
+    raw = config.get('goal_usd') if isinstance(config, dict) else None
+    if raw is None or raw == '':
+        return D('78')
+    return D(raw)
+
+
 def public_resolution_price(market, outcome, token):
     """Payout per share from a resolved Gamma market, or (None, reason).
 
@@ -609,6 +617,8 @@ class PaperJournal:
                     decision['unrealized_pnl_usd'] = '0'
                     decision['equity_usd'] = str(cash)
                     decision['equity_reached_78'] = cash >= D('78')
+                    decision['goal_usd'] = str(paper_goal(self.config))
+                    decision['goal_reached'] = cash >= paper_goal(self.config)
                 self.db.execute('INSERT INTO seen VALUES (?,?)',
                                 (f"same-minute:{token}:{int(D(opened))}",json.dumps(decision)))
                 return decision
@@ -720,6 +730,8 @@ class PaperJournal:
                     decision['unrealized_pnl_usd'] = '0'
                     decision['equity_usd'] = str(cash)
                     decision['equity_reached_78'] = cash >= D('78')
+                    decision['goal_usd'] = str(paper_goal(self.config))
+                    decision['goal_reached'] = cash >= paper_goal(self.config)
                 self.db.execute('INSERT INTO seen VALUES (?,?)',(key,json.dumps(decision)))
                 results.append(decision)
         return results
@@ -792,6 +804,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     exited['equity_usd'] = port.get('equity_at_liquidation_quote_usd')
                     equity = port.get('equity_at_liquidation_quote_usd')
                     exited['equity_reached_78'] = equity is not None and D(equity) >= D('78')
+                    exited['goal_usd'] = str(paper_goal(config))
+                    exited['goal_reached'] = equity is not None and D(equity) >= paper_goal(config)
             emit(exited)
             remember(window_index, exited)
 
@@ -861,7 +875,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                   equity_usd=str(opening_equity),
                   unrealized_pnl_usd=opening.get('unrealized_pnl_at_liquidation_quote_usd'),
                   realized_pnl_usd=opening.get('realized_pnl_usd'),
-                  equity_reached_78=opening_equity>=D('78')))
+                  goal_usd=str(paper_goal(config)),
+                  equity_reached_78=opening_equity>=D('78'),
+                  goal_reached=opening_equity>=paper_goal(config)))
         try:
             for window_index in range(1, args.windows+1):
                 window_started = time.monotonic()
@@ -979,7 +995,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         emit(summary)
     if args.result:
         ending_equity = final.get('equity_at_liquidation_quote_usd')
-        goal_reached = ending_equity is not None and D(ending_equity) >= D('78')
+        goal = paper_goal(config)
+        goal_reached = ending_equity is not None and D(ending_equity) >= goal
         result=dict(name='Paper C',paper_only=True,live_orders=False,private_keys_used=False,brez_used=False,
                     leader_wallet=config['leader_wallet'],leader_handle='@bosona',
                     starting_cash_usd=str(D(config['starting_cash_usd'])),
@@ -1003,7 +1020,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     rule_changed_this_run=rule_reset is not None or sample_reset,
                     rule_changed=('sell_same_minute_if_bid_above_cost' if sample_reset
                                   else None if rule_reset is None else rule_reset['rule_changed']),
-                    rule_change_why=(('The previous book was steadily losing, so cash was reset to $39 and the open positions were dropped. '
+                    rule_change_why=(('The previous book was steadily losing, so cash was reset to $'
+                                      +str(D(config['starting_cash_usd']))+' and the open positions were dropped. '
                                       'The one rule change is to sell a paper position when the bid is above paper cost in the same minute it opened, without waiting for a sell he prints.')
                                      if sample_reset else None if rule_reset is None else rule_reset['why']),
                     second_rule_changed=False,
@@ -1018,7 +1036,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                             for d in session_decisions
                             if d.get('status')=='PAPER_RESOLUTION' or d.get('reason')=='same_minute_bid_above_paper_cost'],
                     book_was_steadily_losing=rule_reset is not None,
-                    goal_usd='78',goal_reached=goal_reached,poll_seconds=config['poll_seconds'],
+                    goal_usd=str(goal),goal_reached=goal_reached,poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
                     filter=('Copy his exact share count, same side and market, only when the full size fills at his price or better. '
                             'Skip that buy when the size is not on the book or costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. '

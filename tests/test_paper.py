@@ -310,6 +310,23 @@ def seed_position(journal, shares, cost):
 
 
 class PaperCTests(unittest.TestCase):
+    def test_configured_goal_is_75_from_37_40_and_the_old_mark_stays_78(self):
+        raw = json.loads(Path("config.paperc.json").read_text())
+        self.assertEqual(raw["starting_cash_usd"], "37.40")
+        self.assertEqual(raw["goal_usd"], "75")
+        self.assertEqual(raw["leader_wallet"], "0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed")
+        self.assertEqual(raw["strategy"], "paper_c")
+        self.assertTrue(raw["copy_buys_at_or_better"])
+        self.assertTrue(raw["sell_same_minute_if_bid_above_cost"])
+        self.assertNotIn("half_cash_cap", raw)
+        self.assertNotIn("cannot_exit", raw)
+        self.assertGreater(Decimal(raw["max_open_cost_usd"]), Decimal(raw["starting_cash_usd"]) / 2)
+        self.assertLess(Decimal(raw["max_open_cost_usd"]), Decimal(raw["starting_cash_usd"]))
+        self.assertEqual(paper.paper_goal(raw), Decimal("75"))
+        self.assertEqual(paper.paper_goal({}), Decimal("78"))
+        self.assertEqual(paper.paper_goal({"goal_usd": ""}), Decimal("78"))
+
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
