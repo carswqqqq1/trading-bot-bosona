@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -260,3 +260,31 @@ One position was still open at the sample end. Its market had not resolved, and 
 | Equity reached $78 | no |
 
 Latency in seconds from his fill to each paper action: 1.4, 1.429, 11.315, 1.422, 1.633, 2.509, 2.895, 3.487, 0.543, 0.941, 6.169, 1.406, 2.422.
+
+## Continued from $12.84734948
+
+The book was not reset and no rule was changed. The run resumed at cash $12.84734948 with 40.19 Up shares of `btc-updown-5m-1790822400` still open, cost $26.82408. [Log](paperc-fresh3-2026-10-01.jsonl).
+
+At resume that position had no bid quote, so unrealized P/L was left unset. The resumed equity figure of $12.84734948 is cash only.
+
+The market later published a resolution. Gamma `umaResolutionStatus` was `resolved`, the market was closed, and `outcomePrices` were `["1", "0"]` for outcomes `["Up", "Down"]`, `closedTime` `2026-10-01 02:46:26+00`. The paper close used the published Up price of 1.
+
+| Close | Shares | Public price | Proceeds | Cost | Realized | Cash after | Unrealized | Equity | Equity reached $78 | Latency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| Up `btc-updown-5m-1790822400` | 40.19 | 1 | 40.19 | 26.82408 | 13.36592 | 50.46530948 | unset; the hourly position was still open | unset | unset on this close | none; this is not one of his fills |
+
+The same windows copied one buy: 20.19 Up shares of `bitcoin-up-or-down-september-30-2026-10pm-et` at his price 0.12, gross $2.4228, fee $0.14924, cost $2.57204, cash after the buy $10.27530948, latency 1.421 seconds. That position was still open at the sample end. No same-minute sell printed.
+
+| Open position | Shares | Cost | Liquidation quote |
+| --- | ---: | ---: | ---: |
+| Up `bitcoin-up-or-down-september-30-2026-10pm-et` | 20.19 | 2.57204 | 2.84830 |
+
+| | USD |
+| --- | ---: |
+| Ending cash | 50.46530948 |
+| Realized P/L | 14.03734948 |
+| Unrealized P/L | 0.27626 |
+| Equity | 53.31360948 |
+| Equity reached $78 | no |
+
+Latency in seconds from his fill to each paper action: 1.413, 1.463, 1.471, 1.421, 1.451, 1.643, 6.189. The resolution has no fill-to-action latency.
