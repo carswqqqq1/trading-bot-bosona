@@ -1,0 +1,149 @@
+{
+  "name": "Paper C",
+  "paper_only": true,
+  "live_orders": false,
+  "private_keys_used": false,
+  "brez_used": false,
+  "leader_wallet": "0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed",
+  "leader_handle": "@bosona",
+  "starting_cash_usd": "37.40",
+  "ending_cash_usd": "37.40",
+  "realized_pnl_usd": "0",
+  "fees_usd": "0",
+  "copies": 0,
+  "skips": 2,
+  "unrealized_pnl_usd": "0",
+  "equity_usd": "37.40",
+  "any_sell_copied": false,
+  "sells_copied": 0,
+  "decisions": 2,
+  "decision_latency_seconds": [
+    {
+      "window": 1,
+      "side": "BUY",
+      "slug": "bitcoin-up-or-down-october-1-2026-11am-et",
+      "action": "SKIP",
+      "reason": "latency_worse_than_leader_price",
+      "his_price": "0.14",
+      "our_price": "0.18",
+      "cent_gap": "4.00",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": "0",
+      "fee_usd": null,
+      "fee_collected_in": null,
+      "share_fee": null,
+      "latency_seconds": 2.439
+    },
+    {
+      "window": 3,
+      "side": "BUY",
+      "slug": "btc-updown-15m-1790869500",
+      "action": "SKIP",
+      "reason": "below_market_minimum",
+      "his_price": "0.92",
+      "our_price": null,
+      "cent_gap": null,
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": "0",
+      "fee_usd": null,
+      "fee_collected_in": null,
+      "share_fee": null,
+      "latency_seconds": 2.454
+    }
+  ],
+  "reset_to_39": false,
+  "rule_changed_this_run": true,
+  "rule_changed": "sell_any_minute_if_bid_above_cost",
+  "rule_change_why": "The one rule change is to sell a paper position in any minute when the bid is above paper cost, not only in the minute it opened. Starting cash is $37.40. The goal is $75. Exact size, his price or better, the 5-share minimum, and the 0.07 crypto taker fee stay. A worse price is not copied. No live order is placed.",
+  "second_rule_changed": false,
+  "closes": [],
+  "book_was_steadily_losing": false,
+  "goal_usd": "75",
+  "goal_reached": false,
+  "poll_seconds": 0.05,
+  "latency_definition": "seconds from his fill timestamp to the paper copy or skip",
+  "filter": "Copy his exact share count, same side and market, only when the full size fills at his price or better. Skip that buy when the size is not on the book or costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. Do not copy at a worse price. A new fill is a taker. The fee is shares times feeRate times price times one minus price, rounded to five decimals. Crypto taker fee is 0.07 unless the market names another rate. On a buy that fee is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee. Copy a sell he prints only when it closes an existing paper position above paper cost. In any minute, sell the position when the bid is above paper cost without waiting for a sell he prints.",
+  "windows": [
+    {
+      "window": 1,
+      "trades": 1,
+      "note": null,
+      "his_trades": [
+        {
+          "window": 1,
+          "action": "SKIP",
+          "reason": "latency_worse_than_leader_price",
+          "his_trade": {
+            "side": "BUY",
+            "slug": "bitcoin-up-or-down-october-1-2026-11am-et",
+            "outcome": "Up",
+            "size": "50.0",
+            "price": "0.14",
+            "transaction": "0xe4d0d5361b731c68dd63f0fa51b0f3eb95209f32cb0ffe27bee78b11b078d333",
+            "timestamp": 1790869482
+          },
+          "his_price": "0.14",
+          "our_price": "0.18",
+          "cent_gap": "4.00",
+          "realized_pnl_usd": "0",
+          "unrealized_pnl_usd": "0",
+          "decision_latency_seconds": 2.439,
+          "fee_usd": null,
+          "fee_collected_in": null,
+          "share_fee": null,
+          "copied_sell": false,
+          "rule_skipped": true,
+          "price_note": null
+        }
+      ],
+      "cash_usd": "37.40",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": "0"
+    },
+    {
+      "window": 2,
+      "trades": 0,
+      "note": "No trade in this window.",
+      "his_trades": [],
+      "cash_usd": "37.40",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": "0"
+    },
+    {
+      "window": 3,
+      "trades": 1,
+      "note": null,
+      "his_trades": [
+        {
+          "window": 3,
+          "action": "SKIP",
+          "reason": "below_market_minimum",
+          "his_trade": {
+            "side": "BUY",
+            "slug": "btc-updown-15m-1790869500",
+            "outcome": "Up",
+            "size": "4.63",
+            "price": "0.92",
+            "transaction": "0xac5431636632fad56441d0550ae37788cb88ab2e26323e5c06293326eb74a4b7",
+            "timestamp": 1790869760
+          },
+          "his_price": "0.92",
+          "our_price": null,
+          "cent_gap": null,
+          "realized_pnl_usd": "0",
+          "unrealized_pnl_usd": "0",
+          "decision_latency_seconds": 2.454,
+          "fee_usd": null,
+          "fee_collected_in": null,
+          "share_fee": null,
+          "copied_sell": false,
+          "rule_skipped": true,
+          "price_note": "No paper fill, so there is no our price and no cent gap."
+        }
+      ],
+      "cash_usd": "37.40",
+      "realized_pnl_usd": "0",
+      "unrealized_pnl_usd": "0"
+    }
+  ]
+}
