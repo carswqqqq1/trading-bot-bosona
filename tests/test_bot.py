@@ -233,5 +233,104 @@ class WatcherTests(unittest.TestCase):
             self.assertEqual(restarted.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 2)
 
 
+class ScriptedConnection:
+    def __init__(self, responses, clock):
+        self.responses = list(responses)
+        self.clock = clock
+        self.sent_at = []
+
+    def request(self, method, path, headers=None):
+        self.sent_at.append(self.clock["t"])
+
+    def getresponse(self):
+        return self.responses.pop(0)
+
+    def close(self):
+        pass
+
+
+class ScriptedResponse:
+    def __init__(self, status, body=b"{}", retry_after=None):
+        self.status = status
+        self._body = body if isinstance(body, bytes) else body.encode()
+        self._retry_after = retry_after
+
+    def read(self):
+        return self._body
+
+    def getheader(self, name):
+        if name.lower() == "retry-after":
+            return self._retry_after
+        return None
+
+
+def pooled_client(host, responses):
+    clock = {"t": 0.0}
+    sleeps = []
+    client = bot.SharedPool()
+    client.now = lambda: clock["t"]
+
+    def sleeper(seconds):
+        sleeps.append(seconds)
+        clock["t"] += seconds
+
+    client.sleeper = sleeper
+    client.conns[host] = ScriptedConnection(responses, clock)
+    return client, sleeps
+
+
+class SharedPoolTests(unittest.TestCase):
+    def test_429_does_not_send_again_until_the_backoff_has_elapsed(self):
+        host = "data-api.polymarket.com"
+        client, sleeps = pooled_client(host, [
+            ScriptedResponse(429, retry_after="2"),
+            ScriptedResponse(200, b'{"data":[]}'),
+        ])
+        url = "https://data-api.polymarket.com/v2/activity"
+        with self.assertRaises(bot.RateLimited) as caught:
+            client.get_json(url, {"limit": "1"})
+        self.assertEqual(caught.exception.retry_after, 2.0)
+        self.assertEqual(client.conns[host].sent_at, [0.0])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(client.get_json(url, {"limit": "1"}), {"data": []})
+        self.assertEqual(sleeps, [2.0])
+        self.assertEqual(client.conns[host].sent_at, [0.0, 2.0])
+
+    def test_repeated_429_grows_the_backoff(self):
+        host = "data-api.polymarket.com"
+        client, sleeps = pooled_client(host, [
+            ScriptedResponse(429),
+            ScriptedResponse(429),
+            ScriptedResponse(200, b'{"ok":1}'),
+        ])
+        url = "https://data-api.polymarket.com/v2/activity"
+        with self.assertRaises(bot.RateLimited):
+            client.get_json(url)
+        with self.assertRaises(bot.RateLimited):
+            client.get_json(url)
+        self.assertEqual(client.get_json(url), {"ok": 1})
+        self.assertEqual(sleeps, [1.0, 2.0])
+        self.assertEqual(client.conns[host].sent_at, [0.0, 1.0, 3.0])
+
+    def test_market_documents_are_cached_and_books_are_not(self):
+        host = "gamma-api.polymarket.com"
+        client, _sleeps = pooled_client(host, [
+            ScriptedResponse(200, b'{"slug":"m"}'),
+        ])
+        url = "https://gamma-api.polymarket.com/markets/slug/m"
+        self.assertEqual(client.get_json(url), {"slug": "m"})
+        self.assertEqual(client.get_json(url), {"slug": "m"})
+        self.assertEqual(client.conns[host].sent_at, [0.0])
+        book_host = "clob.polymarket.com"
+        book = ScriptedConnection([
+            ScriptedResponse(200, b'{"bids":[]}'),
+            ScriptedResponse(200, b'{"bids":[1]}'),
+        ], {"t": 0.0})
+        client.conns[book_host] = book
+        self.assertEqual(client.get_json("https://clob.polymarket.com/book", {"token_id": "1"}), {"bids": []})
+        self.assertEqual(client.get_json("https://clob.polymarket.com/book", {"token_id": "1"}), {"bids": [1]})
+        self.assertEqual(book.sent_at, [0.0, 0.0])
+
+
 if __name__ == "__main__":
     unittest.main()

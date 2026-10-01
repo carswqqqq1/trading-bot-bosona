@@ -52,60 +52,158 @@ def validate(config):
     return config
 
 
-_connections = threading.local()
+class RateLimited(Exception):
+    """The host returned 429. retry_after is how long this client will stay quiet."""
+
+    def __init__(self, host, retry_after):
+        self.host = host
+        self.retry_after = retry_after
+        super().__init__("http_429 backoff "+str(retry_after)+"s "+host)
 
 
-def _https_connection(host):
-    """One keep-alive connection per host per thread. A dead socket is replaced."""
-    conns = getattr(_connections, "conns", None)
-    if conns is None:
-        conns = {}
-        _connections.conns = conns
-    conn = conns.get(host)
-    if conn is None:
-        conn = http.client.HTTPSConnection(host, timeout=10)
-        conns[host] = conn
-    return conn
+class SharedPool:
+    """One keep-alive connection per host, shared by every poller in this process.
+
+    A 429 arms a single backoff clock. Later calls wait that out and do not
+    send on the next poll tick. Gamma market documents are reused; books are not.
+    """
+
+    market_ttl = 15
+
+    def __init__(self):
+        self.state_lock = threading.Lock()
+        self.host_locks = {}
+        self.conns = {}
+        self.backoff_until = 0.0
+        self.backoff_seconds = 1.0
+        self.market_cache = {}
+        self.now = time.monotonic
+        self.sleeper = time.sleep
+
+    def lock_for(self, host):
+        with self.state_lock:
+            lock = self.host_locks.get(host)
+            if lock is None:
+                lock = threading.Lock()
+                self.host_locks[host] = lock
+            return lock
+
+    def backoff_remaining(self):
+        with self.state_lock:
+            return max(0.0, self.backoff_until - self.now())
+
+    def note_429(self, retry_after):
+        with self.state_lock:
+            wait = self.backoff_seconds
+            if retry_after is not None:
+                wait = max(wait, retry_after)
+            wait = min(float(wait), 60.0)
+            self.backoff_until = self.now() + wait
+            self.backoff_seconds = min(self.backoff_seconds * 2, 60.0)
+            return wait
+
+    def note_success(self):
+        with self.state_lock:
+            self.backoff_seconds = 1.0
+
+    def cached_market(self, url):
+        if "/markets" not in urlsplit(url).path:
+            return None
+        with self.state_lock:
+            hit = self.market_cache.get(url)
+            if hit and self.now() - hit[0] <= self.market_ttl:
+                return hit[1]
+        return None
+
+    def store_market(self, url, payload):
+        if "/markets" not in urlsplit(url).path:
+            return
+        with self.state_lock:
+            self.market_cache[url] = (self.now(), payload)
+
+    def connection(self, host):
+        conn = self.conns.get(host)
+        if conn is None:
+            conn = http.client.HTTPSConnection(host, timeout=10)
+            self.conns[host] = conn
+        return conn
+
+    def drop(self, host):
+        conn = self.conns.pop(host, None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def get_json(self, base, params=None):
+        url = base + ("?" + urlencode(params) if params else "")
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.hostname:
+            request = Request(url, headers={"User-Agent": "btc-copy-paper-prototype/0.1"})
+            with urlopen(request, timeout=10) as response:
+                return json.load(response)
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        headers = {"User-Agent": "btc-copy-paper-prototype/0.1", "Accept": "application/json",
+                   "Connection": "keep-alive"}
+        reconnects = 0
+        while True:
+            cached = self.cached_market(url)
+            if cached is not None:
+                return cached
+            delay = self.backoff_remaining()
+            if delay > 0:
+                self.sleeper(delay)
+                continue
+            with self.lock_for(parts.hostname):
+                cached = self.cached_market(url)
+                if cached is not None:
+                    return cached
+                delay = self.backoff_remaining()
+                if delay > 0:
+                    continue
+                try:
+                    conn = self.connection(parts.hostname)
+                    conn.request("GET", path, headers=headers)
+                    response = conn.getresponse()
+                    payload = response.read()
+                    status = response.status
+                    retry_after = _retry_after_seconds(response.getheader("Retry-After"))
+                except (http.client.HTTPException, OSError):
+                    self.drop(parts.hostname)
+                    reconnects += 1
+                    if reconnects >= 2:
+                        raise
+                    continue
+                if status == 429:
+                    wait = self.note_429(retry_after)
+                    raise RateLimited(parts.hostname, wait)
+                if status != 200:
+                    self.drop(parts.hostname)
+                    raise ValueError("http_"+str(status))
+                self.note_success()
+                parsed = json.loads(payload)
+                self.store_market(url, parsed)
+                return parsed
 
 
-def _drop_connection(host):
-    conns = getattr(_connections, "conns", None) or {}
-    conn = conns.pop(host, None)
-    if conn is not None:
-        try:
-            conn.close()
-        except Exception:
-            pass
+def _retry_after_seconds(header):
+    if header is None or header == "":
+        return None
+    try:
+        return max(0.0, float(header))
+    except (TypeError, ValueError):
+        return None
+
+
+CLIENT = SharedPool()
 
 
 def get_json(base, params=None):
-    """GET JSON. Repeat calls to the same host reuse the TLS session."""
-    url = base + ("?" + urlencode(params) if params else "")
-    parts = urlsplit(url)
-    if parts.scheme != "https" or not parts.hostname:
-        request = Request(url, headers={"User-Agent": "btc-copy-paper-prototype/0.1"})
-        with urlopen(request, timeout=10) as response:
-            return json.load(response)
-    path = parts.path or "/"
-    if parts.query:
-        path += "?" + parts.query
-    headers = {"User-Agent": "btc-copy-paper-prototype/0.1", "Accept": "application/json",
-               "Connection": "keep-alive"}
-    last_error = None
-    for _ in range(2):
-        conn = _https_connection(parts.hostname)
-        try:
-            conn.request("GET", path, headers=headers)
-            response = conn.getresponse()
-            payload = response.read()
-            if response.status != 200:
-                _drop_connection(parts.hostname)
-                raise ValueError("http_"+str(response.status))
-            return json.loads(payload)
-        except Exception as exc:
-            _drop_connection(parts.hostname)
-            last_error = exc
-    raise last_error
+    """GET JSON through the shared pool. A 429 waits out its backoff once."""
+    return CLIENT.get_json(base, params)
 
 
 def activity(wallet, start, end, fetch=get_json):

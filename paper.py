@@ -37,13 +37,13 @@ import math
 import re
 import sqlite3
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_CEILING
 from pathlib import Path
 from urllib.parse import quote as urlquote
 
-from bot import activity, array, decimal as D, get_json, market_timeframe, row_keys, source_skip, validate
+from bot import activity, array, decimal as D, get_json, market_timeframe, row_keys, source_skip, validate, RateLimited
 
 ZERO = Decimal(0)
 STEP = Decimal('0.01')
@@ -793,16 +793,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
     observations, session_decisions, windows, equity_samples = {}, [], [], []
     rule_reset = None
     started = time.monotonic()
-    market_cache = {}
-
     def load_market(slug):
-        now = time.time()
-        hit = market_cache.get(slug)
-        if hit and now - hit[0] <= 1:
-            return hit[1]
-        payload = get_json('https://gamma-api.polymarket.com/markets/slug/'+urlquote(slug, safe=''))
-        market_cache[slug] = (time.time(), payload)
-        return payload
+        # Gamma documents are cached in the shared client. The book is not.
+        return get_json('https://gamma-api.polymarket.com/markets/slug/'+urlquote(slug, safe=''))
 
     with Path(args.output).open('a') as output, ThreadPoolExecutor(max_workers=8) as pool:
         def emit(record):
@@ -910,12 +903,14 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                 emit(dict(status='WINDOW_START',window=window_index,cash_usd=str(journal.cash),
                           paper=True,executed=False))
                 activity_future = None
+                requested_at = None
                 while time.monotonic()-window_started < args.duration:
                     # A same-minute position sells on the first book whose bid clears
                     # cost. The activity request must not hold that check.
                     if minute_position_open():
                         sell_same_minute(window_index)
                     if activity_future is None:
+                        requested_at=time.monotonic()
                         activity_future=pool.submit(activity,config['leader_wallet'],max(source_start,int(time.time())-120),int(time.time()))
                     while not activity_future.done() and minute_position_open() and time.monotonic()-window_started < args.duration:
                         watched=time.monotonic()
@@ -925,13 +920,20 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                             time.sleep(pause)
                     try:
                         rows=activity_future.result()
+                    except RateLimited as exc:
+                        # One quiet period for this 429. Do not send again on the next poll tick.
+                        emit(dict(status='ERROR',message=str(exc),retry_after_seconds=exc.retry_after))
+                        activity_future=None
+                        pause=max(0.0, float(exc.retry_after))
+                        remaining=args.duration-(time.monotonic()-window_started)
+                        if pause > 0 and remaining > 0:
+                            time.sleep(min(pause, remaining))
+                        continue
                     except Exception as exc:
                         emit(dict(status='ERROR',message=str(exc)))
                         activity_future=None
                         time.sleep(0.5)
                         continue
-                    # The next poll starts before this snapshot's book reads.
-                    activity_future=pool.submit(activity,config['leader_wallet'],max(source_start,int(time.time())-120),int(time.time()))
                     pending=[]
                     for key,row in row_keys(rows):
                         if journal.contains(key):
@@ -985,12 +987,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                 emit(decision)
                                 remember(window_index, decision)
                                 continue
-                            hit = market_cache.get(row['slug'])
-                            if hit and appeared - hit[0] <= 1:
-                                market_future=Future()
-                                market_future.set_result(hit[1])
-                            else:
-                                market_future=pool.submit(load_market, row['slug'])
+                            market_future=pool.submit(load_market, row['slug'])
                             book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':row['token_id']})
                             pending.append((key,row,market_future,book_future))
                         except Exception as exc:
@@ -1008,6 +1005,13 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                         except Exception as exc:
                             emit(dict(status='ERROR',message=str(exc),event_id=key))
                     sell_same_minute(window_index)
+                    activity_future=None
+                    # Stay on the configured poll tick. A 429 has already waited its own backoff.
+                    if requested_at is not None and not minute_position_open():
+                        pace=config['poll_seconds']-(time.monotonic()-requested_at)
+                        remaining=args.duration-(time.monotonic()-window_started)
+                        if pace > 0 and remaining > 0:
+                            time.sleep(min(pace, remaining))
                 for close in journal.realize_public_resolutions(get_json, time.time()):
                     emit(close)
                     if close.get('status')=='PAPER_RESOLUTION':
