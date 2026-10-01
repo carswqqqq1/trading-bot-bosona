@@ -39,7 +39,8 @@ from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_CEILING
 from pathlib import Path
 from urllib.parse import quote as urlquote
 
-from bot import activity, array, decimal as D, get_json, market_timeframe, row_keys, source_skip, validate
+from bot import (activity, array, decimal as D, get_json, market_timeframe, row_keys,
+                   source_skip, validate, RateLimited)
 
 ZERO = Decimal(0)
 STEP = Decimal('0.01')
@@ -818,6 +819,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                         market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
                         book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
                         books.append((market_future.result(), book_future.result()))
+                    except RateLimited:
+                        raise
                     except Exception as exc:
                         emit(dict(status='ERROR',message=str(exc),token_id=token))
             for market_row, book_row in books:
@@ -869,11 +872,12 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                           paper=True,executed=False))
                 while time.monotonic()-window_started < args.duration:
                     next_request = time.monotonic()+config['poll_seconds']
+                    limited = False
                     # An open position sells on the first book whose bid clears
                     # cost, in any minute. The activity request must not hold that check.
-                    if position_open():
-                        sell_if_bid_above_cost(window_index)
                     try:
+                        if position_open():
+                            sell_if_bid_above_cost(window_index)
                         activity_future=pool.submit(activity,config['leader_wallet'],max(source_start,int(time.time())-120),int(time.time()))
                         while not activity_future.done() and position_open() and time.monotonic()-window_started < args.duration:
                             watched=time.monotonic()
@@ -932,14 +936,23 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                         decision=journal.process(key,row,{},{},appeared,skip_reason=reason)
                                         emit(decision)
                                         remember(window_index, decision)
+                            except RateLimited:
+                                raise
                             except Exception as exc:
                                 emit(dict(status='ERROR',message=str(exc),event_id=key))
+                    except RateLimited as exc:
+                        limited = True
+                        if exc.fresh:
+                            emit(dict(status='BACKOFF',paper=True,executed=False,host=exc.host,
+                                      retry_after_seconds=exc.retry_after,message='rate_limited'))
+                        next_request=max(next_request,time.monotonic()+exc.retry_after)
                     except Exception as exc:
                         emit(dict(status='ERROR',message=str(exc)))
                         next_request=max(next_request,time.monotonic()+0.5)
-                    sell_if_bid_above_cost(window_index)
+                    if not limited:
+                        sell_if_bid_above_cost(window_index)
                     remaining=args.duration-(time.monotonic()-window_started)
-                    if remaining > 0 and not position_open():
+                    if remaining > 0 and (limited or not position_open()):
                         time.sleep(min(max(0,next_request-time.monotonic()),remaining))
                 for close in journal.realize_public_resolutions(get_json, time.time()):
                     emit(close)
@@ -1102,6 +1115,7 @@ def main():
         try:
             while time.monotonic()-started < args.duration:
                 next_request = time.monotonic()+config['poll_seconds']
+                limited = False
                 try:
                     rows=activity(config['leader_wallet'],max(source_start,int(time.time())-120),int(time.time()))
                     for key,row in row_keys(rows):
@@ -1132,9 +1146,20 @@ def main():
                             market,book=market_future.result(),book_future.result()
                         emit(journal.process(key,row,market,book,time.time(),
                                              skip_reason='resume_backlog_not_copied' if backlog else None))
+                except RateLimited as exc:
+                    limited = True
+                    if exc.fresh:
+                        emit(dict(status='BACKOFF',paper=True,executed=False,host=exc.host,
+                                  retry_after_seconds=exc.retry_after,message='rate_limited'))
+                    next_request=max(next_request,time.monotonic()+exc.retry_after)
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))
                     next_request=max(next_request,time.monotonic()+2)
+                if limited:
+                    remaining=args.duration-(time.monotonic()-started)
+                    if remaining > 0:
+                        time.sleep(min(max(0,next_request-time.monotonic()),remaining))
+                    continue
                 for token,position in list(journal.holdings().items()):
                     if position['shares'] <= 0:
                         continue
@@ -1144,6 +1169,12 @@ def main():
                         exited=journal.realize_if_bid_above_cost(market_future.result(),book_future.result(),time.time())
                         if exited:
                             emit(exited)
+                    except RateLimited as exc:
+                        if exc.fresh:
+                            emit(dict(status='BACKOFF',paper=True,executed=False,host=exc.host,
+                                      retry_after_seconds=exc.retry_after,message='rate_limited'))
+                        next_request=max(next_request,time.monotonic()+exc.retry_after)
+                        break
                     except Exception as exc:
                         emit(dict(status='ERROR',message=str(exc)))
                 remaining=args.duration-(time.monotonic()-started)

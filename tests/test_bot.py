@@ -1,6 +1,9 @@
 import contextlib
 import io
+import json
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -231,6 +234,125 @@ class WatcherTests(unittest.TestCase):
             self.assertGreater(spent, 0)
             self.assertLessEqual(spent, Decimal("50"))
             self.assertEqual(restarted.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 2)
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def scripted_client(responses):
+    calls = []
+
+    def transport(host, path):
+        calls.append((host, path))
+        status, headers, body = responses[len(calls) - 1]
+        if isinstance(body, dict):
+            body = json.dumps(body).encode()
+        return status, headers, body
+
+    clock = Clock()
+    return bot.PublicClient(transport=transport, clock=clock), calls, clock
+
+
+class PublicClientTests(unittest.TestCase):
+    def test_429_pauses_the_host_and_does_not_hit_it_again(self):
+        client, calls, clock = scripted_client([
+            (429, {"retry-after": "5"}, b""),
+            (200, {}, {"asks": []}),
+        ])
+        book = "https://clob.polymarket.com/book"
+        with self.assertRaises(bot.RateLimited) as caught:
+            client.get_json(book, {"token_id": "1"})
+        self.assertTrue(caught.exception.fresh)
+        self.assertEqual(caught.exception.retry_after, 5)
+        self.assertEqual(caught.exception.host, "clob.polymarket.com")
+        for _ in range(10):
+            with self.assertRaises(bot.RateLimited) as later:
+                client.get_json(book, {"token_id": "9"})
+            self.assertFalse(later.exception.fresh)
+        self.assertEqual(len(calls), 1)
+        clock.now = 5
+        self.assertEqual(client.get_json(book, {"token_id": "9"}), {"asks": []})
+        self.assertEqual(len(calls), 2)
+
+    def test_market_and_book_reads_share_one_client_cache(self):
+        client, calls, clock = scripted_client([
+            (200, {}, {"slug": "btc"}),
+            (200, {}, {"bids": [{"price": "0.4", "size": "5"}]}),
+            (200, {}, {"bids": [{"price": "0.5", "size": "5"}]}),
+        ])
+        market = "https://gamma-api.polymarket.com/markets/slug/btc-updown-5m-1"
+        book = "https://clob.polymarket.com/book"
+        self.assertEqual(client.get_json(market)["slug"], "btc")
+        self.assertEqual(client.get_json(market)["slug"], "btc")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(client.get_json(book, {"token_id": "1"})["bids"][0]["price"], "0.4")
+        self.assertEqual(client.get_json(book, {"token_id": "1"})["bids"][0]["price"], "0.4")
+        self.assertEqual(len(calls), 2)
+        clock.now = 1
+        self.assertEqual(client.get_json(book, {"token_id": "1"})["bids"][0]["price"], "0.5")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(client.get_json(market)["slug"], "btc")
+        self.assertEqual(len(calls), 3)
+
+    def test_activity_is_not_cached_and_a_missing_retry_after_waits_at_least_one_second(self):
+        client, calls, clock = scripted_client([
+            (200, {}, {"data": []}),
+            (200, {}, {"data": [1]}),
+            (429, {}, b""),
+            (200, {}, {"data": [2]}),
+        ])
+        url = "https://data-api.polymarket.com/v2/activity"
+        self.assertEqual(client.get_json(url, {"user": "0xabc"})["data"], [])
+        self.assertEqual(client.get_json(url, {"user": "0xabc"})["data"], [1])
+        self.assertEqual(len(calls), 2)
+        with self.assertRaises(bot.RateLimited) as caught:
+            client.get_json(url, {"user": "0xabc"})
+        self.assertGreaterEqual(caught.exception.retry_after, 1)
+        with self.assertRaises(bot.RateLimited):
+            client.get_json(url, {"user": "0xabc"})
+        self.assertEqual(len(calls), 3)
+        clock.now = caught.exception.retry_after
+        self.assertEqual(client.get_json(url, {"user": "0xabc"})["data"], [2])
+        self.assertEqual(len(calls), 4)
+
+    def test_concurrent_book_reads_use_one_request(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def transport(host, path):
+            calls.append((host, path))
+            started.set()
+            self.assertTrue(release.wait(1))
+            return 200, {}, json.dumps({"bids": []}).encode()
+
+        client = bot.PublicClient(transport=transport, clock=lambda: 0.0)
+        results = []
+
+        def read():
+            results.append(client.get_json("https://clob.polymarket.com/book", {"token_id": "7"}))
+
+        first = threading.Thread(target=read)
+        second = threading.Thread(target=read)
+        first.start()
+        self.assertTrue(started.wait(1))
+        second.start()
+        time.sleep(0.05)
+        release.set()
+        first.join(1)
+        second.join(1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(results, [{"bids": []}, {"bids": []}])
+
+    def test_public_gets_share_one_pool(self):
+        self.assertIsInstance(bot.client, bot.PublicClient)
+        self.assertIs(bot.get_json.__globals__["client"], bot.client)
+        self.assertEqual(bot.client.max_connections_per_host, 2)
 
 
 if __name__ == "__main__":
