@@ -16,5 +16,6 @@
   "cash_reached_75": false,
   "seconds_since_start": 7089.966,
   "seconds_from_start_to_goal": null,
-  "rule": "btc-updown-5m only; buy five shares at his price or better; sell in any minute once the bid is no longer above paper cost; taker fee 0.07"
+  "rule": "printed btc-updown-5m only; his exact size; his price or better; no invented fill",
+  "copies_are": "his public activity prints only"
 }

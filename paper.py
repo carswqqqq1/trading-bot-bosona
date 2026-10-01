@@ -366,6 +366,7 @@ class PaperJournal:
             latency = round(now-int(row['timestamp']),3)
             decision = dict(status='SKIP',event_id=key,paper=True,executed=False,side=row['side'],slug=row['slug'],
                             outcome=row['outcome'],source_transaction=row.get('transaction_hash'),
+                            leader_transaction_hash=str(row.get('transaction_hash') or ''),
                             source_timestamp_seconds=row['timestamp'],source_size=str(row.get('size')),
                             source_to_decision_seconds=latency,decision_latency_seconds=latency,
                             decision_at_utc=datetime.fromtimestamp(now,timezone.utc).isoformat())
@@ -419,26 +420,25 @@ class PaperJournal:
                     pass
                 exact_buy = False
                 if self.config.get('strategy')=='paper_c' and row['side']=='SELL':
-                    # His sell, his market, and only a close that nets a gain above paper cost.
+                    # His printed sell only. Same market, his size that we hold,
+                    # and only at his price or better. A bid under his price is not a copy.
                     quantity = position['shares'].quantize(STEP,rounding=ROUND_DOWN)
                     cost_per = position['cost']/position['shares']
-                    limit = cost_per
-                    deny = 'sell_not_above_paper_cost'
-                    if self.config.get('sell_must_match_his_price'):
-                        limit = max(limit, source_price)
-                        deny = 'sell_worse_than_his_price'
+                    limit = max(cost_per, source_price)
                     if quantity < minimum or quantity <= 0:
                         raise ValueError('below_market_minimum_or_budget_cap')
                     try:
                         fill = quote(book,'SELL',quantity,rate,limit)
                     except ValueError:
-                        raise ValueError(deny)
+                        if source_price > cost_per:
+                            raise ValueError('sell_worse_than_his_price')
+                        raise ValueError('sell_not_above_paper_cost')
                     removed_cost = position['cost']*quantity/position['shares']
                     net = fill['gross']-fill['fee']
+                    if fill['vwap'] < source_price:
+                        raise ValueError('sell_worse_than_his_price')
                     if net <= removed_cost:
                         raise ValueError('sell_not_above_paper_cost')
-                    if self.config.get('sell_must_match_his_price') and fill['vwap'] < source_price:
-                        raise ValueError('sell_worse_than_his_price')
                     cash = self.cash+net
                     position['cost'] -= removed_cost
                     position['shares'] -= quantity
@@ -446,27 +446,25 @@ class PaperJournal:
                         position['cost'] = ZERO
                     decision['realized_pnl_usd'] = str(net-removed_cost)
                 elif row['side']=='BUY' and self.config.get('strategy')=='paper_c' and self.config.get('copy_buys_at_or_better'):
-                    # Five shares, not his full size. One open clip at a time.
-                    # The price is that five-share book VWAP. A better VWAP copies.
-                    # A worse VWAP does not. Cash that cannot cover five shares skips.
-                    if source_shares < max(minimum, FIVE):
+                    # His printed size, same side and market. The price is the
+                    # full-size book VWAP. A better VWAP copies. A worse one does not.
+                    # A smaller size is not invented when cash or the book is short.
+                    quantity = source_shares
+                    if quantity < max(minimum, FIVE):
                         raise ValueError('below_market_minimum')
-                    quantity = FIVE
                     try:
                         fill = quote(book,'BUY',quantity,rate)
                     except ValueError:
-                        raise ValueError('five_shares_not_on_the_book')
+                        raise ValueError('his_size_not_on_the_book')
                     decision['simulated_vwap'] = str(fill['vwap'])
                     if fill['vwap'] > source_price:
                         raise ValueError('latency_worse_than_leader_price')
-                    if position['shares'] > 0:
-                        raise ValueError('five_share_position_already_open')
                     received = quantity - fill['share_fee']
                     if received <= 0:
                         raise ValueError('taker_fee_consumed_the_shares')
                     debit = fill['gross']
                     if debit > self.cash:
-                        raise ValueError('five_shares_exceed_cash')
+                        raise ValueError('his_size_exceeds_cash')
                     cash = self.cash-debit
                     opening = position['shares'] == 0
                     position['shares'] += received
@@ -1253,6 +1251,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
             return False
 
         def sell_same_minute(window_index, market=None, book=None):
+            # A sell he did not print is not a copy.
+            return
             if not config.get('sell_same_minute_if_bid_above_cost'):
                 return
             books = []
@@ -1286,17 +1286,10 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         open_shares = sum((p['shares'] for p in journal.holdings().values()), ZERO)
         fresh_book = journal.cash == D(config['starting_cash_usd']) and open_shares == 0
         goal = paper_c_goal(config)
-        buy_filter = ('only copy a market whose slug contains btc-updown-5m; '
-                      'buy five shares, same side and market, only when those five fill at his price or better; '
-                      'do not copy at a worse price and do not add a second clip while one is open; '
-                      'skip when five shares are not on the book, his print is below 5 shares, or the five cost more than cash; '
-                      'a new buy pays the 0.07 crypto taker fee in shares and a new sell pays it from USDC proceeds; '
-                      'copy a sell he prints only when it closes an existing paper position above paper cost; '
-                      'in any minute, sell once the bid is no longer above paper cost')
-        if config.get('sell_same_minute_if_bid_above_cost'):
-            buy_filter += '; in the opening minute, sell when the bid is above paper cost without waiting for his sell'
-        buy_filter += ('; while equity is under the goal, sell the full position in any minute when the bid is above paper cost; '
-                       'in the last 30 seconds, sell a losing position when the bid still returns cash after the 0.07 fee')
+        buy_filter = ('only copy a printed btc-updown-5m trade from the public activity stream; '
+                      'same side, same market, his exact share count, only when that size fills at his price or better; '
+                      'do not invent a fill, do not pay a worse price, and do not simulate a trade he did not print; '
+                      'a new buy pays the 0.07 crypto taker fee in shares and a printed sell pays it from USDC proceeds')
         emit(dict(status='STARTED',strategy='paper_c',paper=True,executed=False,live_orders=False,
                   private_keys_used=False,leader_wallet=config['leader_wallet'],
                   starting_cash_usd=str(config['starting_cash_usd']),
@@ -1339,7 +1332,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
 
         last_bank = [0.0]
         def bank_or_cap(window_index):
-            """Bank a winner, or cut a loser in the last 30 seconds."""
+            """Do not invent a sell. Only a trade he printed is a fill."""
+            return flat_at_goal()
             if time.time()-last_bank[0] < 1:
                 return flat_at_goal()
             if (public_client.retry_after('clob.polymarket.com') > 0
@@ -1666,16 +1660,12 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     goal_clock_start_utc=datetime.fromtimestamp(goal_clock, timezone.utc).isoformat(),
                     poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
-                    filter=('Copy only a market whose slug contains btc-updown-5m. '
-                            'Copy his exact share count, same side and market, only when the full size fills at his price or better. '
-                            'Do not copy at a worse price. '
-                            'Skip that buy when the size is not on the book, is below 5 shares, or costs more than the cash on hand; do not scale it down. '
-                            'A new fill is a taker. The crypto taker fee rate is 0.07: shares times 0.07 times price times one minus price, rounded to five decimals. '
-                            'On a buy that fee is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee. '
-                            'Copy a sell he prints only when it closes an existing paper position above paper cost. '
-                            'In the same minute a position opens, sell it when the bid is above paper cost without waiting for a sell he prints. '
-                            'While equity is under $75, sell the full position in any minute when the bid clears paper cost, so a gain is banked. '
-                            'In the last 30 seconds, sell a losing position when the bid still returns cash after the 0.07 fee, so it is not held into a zero resolution.'),
+                    filter=('Copy only a printed btc-updown-5m trade from the public activity stream. '
+                            'Same side, same market, his exact share count, only when that size fills at his price or better. '
+                            'Do not invent a fill, do not pay a worse price, and do not simulate a trade he did not print. '
+                            'Skip that buy when the size is not on the book, is below 5 shares, or costs more than the cash on hand. '
+                            'A fill logs his transaction hash and the seconds from his timestamp to the decision. '
+                            'The crypto taker fee rate is 0.07. On a buy it is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee.'),
                     windows=[dict(window=window['window'],trades=window['trades'],note=window['note'],
                                   his_trades=window['decisions'],cash_usd=window['cash_usd'],
                                   realized_pnl_usd=window['realized_pnl_usd'],
