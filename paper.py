@@ -1091,6 +1091,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         def position_open():
             return any(position['shares'] > 0 for position in journal.holdings().values())
 
+        quiet_books = {}
+
         def sell_if_bid_above_cost(window_index, market=None, book=None):
             if not config.get('sell_any_minute_if_bid_above_cost'):
                 return
@@ -1101,6 +1103,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                 for token, position in list(journal.holdings().items()):
                     if position['shares'] <= 0:
                         continue
+                    if quiet_books.get(token, 0) > time.monotonic():
+                        continue
                     try:
                         market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
                         book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
@@ -1108,6 +1112,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     except RateLimited:
                         raise
                     except Exception as exc:
+                        if 'http_404' in str(exc):
+                            quiet_books[token] = time.monotonic() + 30
+                            continue
                         emit(dict(status='ERROR',message=str(exc),token_id=token))
             for market_row, book_row in books:
                 try:
