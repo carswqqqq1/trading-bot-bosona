@@ -5,12 +5,12 @@ https://docs.polymarket.com/trading/fees (verified 2026-09-30). No settlement.
 SELL fraction uses source holdings observed during this session only; earlier
 leader inventory is unknown and unmatched SELLs are refused.
 
-BUY copies keep his side and market, but only when the live book can buy the
-5-share minimum inside the per-buy budget, within max_price_drift of his fill,
-and without a spread that is already well through that fill. Open cost stays
-under max_open_cost_usd, which is below the cash balance, so one burst cannot
-spend the whole account. These checks reject bad entries. They do not guarantee
-a profit.
+BUY copies keep his side and market only when the live book can buy the
+5-share minimum at his fill price or better. If latency has already moved the
+ask above that price, the buy is skipped. A paper position is sold inside the
+same window when the bid is above its average cost and the sale nets a gain.
+Open cost stays under max_open_cost_usd, which is below the cash balance, so
+one burst cannot spend the whole account. These rules do not guarantee a profit.
 """
 import argparse
 import json
@@ -76,36 +76,30 @@ def quote(book, side, quantity, rate, limit=None):
 FIVE = Decimal('5')
 
 
-def buy_entry(book, source_price, rate, tick, minimum, drift, budget, open_room, per_buy_room):
+def buy_entry(book, source_price, rate, tick, minimum, budget, open_room, per_buy_room):
     """Size a BUY at the 5-share minimum, or raise a rule name.
 
-    Uses only his fill, the current book, and the account budget. Passing the
-    checks does not guarantee a profit.
+    The fill must be at his price or better. A worse ask means latency already
+    forced a worse price, so the buy is skipped. Passing does not guarantee a profit.
     """
     if budget <= 0:
         if open_room <= 0 and per_buy_room > 0:
             raise ValueError('open_risk_cap')
         raise ValueError('five_shares_exceed_per_buy_budget')
     asks = levels(book, 'BUY')
-    bids = levels(book, 'SELL')
     if not asks:
-        raise ValueError('five_shares_outside_leader_price')
-    best_ask, best_bid = asks[0][0], (bids[0][0] if bids else None)
-    if best_ask > source_price + drift:
-        raise ValueError('price_chase_above_leader_fill')
-    # A bid already more than the drift below his fill means the spread itself
-    # would mark the paper buy well through his price.
-    if best_bid is None or best_bid < source_price - drift:
-        raise ValueError('spread_through_leader_price')
+        raise ValueError('five_shares_not_at_or_better_than_leader_fill')
+    if asks[0][0] > source_price:
+        raise ValueError('latency_worse_than_leader_price')
     required = max(minimum, FIVE)
     required = (required / STEP).to_integral_value(rounding=ROUND_CEILING) * STEP
-    limit = (min(Decimal('.9999'), source_price + drift) / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+    limit = (source_price / tick).to_integral_value(rounding=ROUND_DOWN) * tick
     try:
         preview = quote(book, 'BUY', required, rate, limit)
     except ValueError:
-        raise ValueError('five_shares_outside_leader_price')
-    if preview['vwap'] > source_price + drift:
-        raise ValueError('fill_through_leader_price')
+        raise ValueError('five_shares_not_at_or_better_than_leader_fill')
+    if preview['vwap'] > source_price:
+        raise ValueError('latency_worse_than_leader_price')
     debit = preview['gross'] + preview['fee']
     if debit > budget:
         if open_room < per_buy_room and debit <= per_buy_room:
@@ -256,7 +250,7 @@ class PaperJournal:
                     open_room = D(self.config['max_open_cost_usd'])-exposure
                     budget = min(per_buy_room, open_room)
                     quantity, limit = buy_entry(
-                        book, source_price, rate, tick, minimum, drift, budget, open_room, per_buy_room)
+                        book, source_price, rate, tick, minimum, budget, open_room, per_buy_room)
                 else:
                     if not leader_before or source_shares > leader_before:
                         raise ValueError('unmatched_source_sell_baseline_inventory_unknown')
@@ -294,6 +288,61 @@ class PaperJournal:
             self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',(token,payload))
             self.db.execute('INSERT INTO seen VALUES (?,?)',(key,json.dumps(decision)))
             return decision
+
+    def realize_if_bid_above_cost(self, market, book, now):
+        """Sell paper shares when the bid is above average cost and nets a gain.
+
+        This can realize a winner inside the window. It does not guarantee one.
+        """
+        token = str(book.get('asset_id') or '')
+        try:
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                position = self.holdings().get(token)
+                if not position or position['shares'] <= 0 or position['cost'] <= 0:
+                    return None
+                if book.get('market') != position['row'].get('condition_id'):
+                    return None
+                age = D(now)*1000-D(book['timestamp'])
+                if age < -1000 or age > D(self.config['max_book_age_seconds'])*1000:
+                    return None
+                rate = fee_rate(market)
+                minimum = D(book['min_order_size'])
+                if minimum <= 0:
+                    return None
+                cost_per = position['cost']/position['shares']
+                bids = [level for level in levels(book,'SELL') if level[0] > cost_per]
+                if not bids:
+                    return None
+                available = sum((size for _,size in bids), ZERO)
+                quantity = min(position['shares'], available).quantize(STEP, rounding=ROUND_DOWN)
+                if quantity < minimum or quantity <= 0:
+                    return None
+                fill = quote(book,'SELL',quantity,rate,cost_per)
+                removed = position['cost']*quantity/position['shares']
+                net = fill['gross']-fill['fee']
+                if net <= removed:
+                    return None
+                cash = self.cash+net
+                position['cost'] -= removed
+                position['shares'] -= quantity
+                if position['shares'] == 0:
+                    position['cost'] = ZERO
+                self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
+                decision = dict(status='PAPER_SELL',reason='bid_above_paper_cost',rule_skipped=False,
+                                paper=True,executed=False,side='SELL',slug=position['row'].get('slug'),
+                                outcome=position['row'].get('outcome'),token_id=token,
+                                shares=str(quantity),gross=str(fill['gross']),fee=str(fill['fee']),
+                                vwap=str(fill['vwap']),realized_pnl_usd=str(net-removed),
+                                cash_usd=str(cash),held_shares=str(position['shares']),
+                                cost_per_share_usd=str(cost_per))
+                self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
+                                (token,json.dumps(position,default=str)))
+                self.db.execute('INSERT INTO seen VALUES (?,?)',
+                                (f"exit:{token}:{now}:{quantity}",json.dumps(decision)))
+                return decision
+        except Exception:
+            return None
 
     def portfolio(self, fetch=get_json):
         positions, marked, unknown = [],ZERO,0
@@ -411,6 +460,17 @@ def main():
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))
                     next_request=max(next_request,time.monotonic()+2)
+                for token,position in list(journal.holdings().items()):
+                    if position['shares'] <= 0:
+                        continue
+                    try:
+                        market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
+                        book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
+                        exited=journal.realize_if_bid_above_cost(market_future.result(),book_future.result(),time.time())
+                        if exited:
+                            emit(exited)
+                    except Exception as exc:
+                        emit(dict(status='ERROR',message=str(exc)))
                 remaining=args.duration-(time.monotonic()-started)
                 if remaining > 0:
                     time.sleep(min(max(0,next_request-time.monotonic()),remaining))
