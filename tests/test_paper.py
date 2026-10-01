@@ -294,6 +294,66 @@ class PaperJournalTests(unittest.TestCase):
         report = self.journal.portfolio(lambda url, params=None: market() if "/markets/slug/" in url else book(timestamp=NOW * 1000))
         self.assertGreater(Decimal(report["realized_pnl_usd"]), 0)
 
+    def test_price_band_buys_the_edges_and_skips_outside(self):
+        policy = config(copy_price_min="0.40", copy_price_max="0.60", max_open_cost_usd="12")
+        journal = paper.PaperJournal(Path(self.tmp.name) / "band.sqlite", policy)
+        self.addCleanup(journal.db.close)
+        below = journal.process(
+            "below", row(transaction_hash="0xbelow", price="0.39"), market(),
+            book(asks=[{"price": "0.39", "size": "100"}], bids=[{"price": "0.38", "size": "100"}]), NOW,
+        )
+        self.assertEqual(below["status"], "SKIP")
+        self.assertEqual(below["reason"], "outside_copy_price_band")
+        self.assertEqual(below["his_price"], "0.39")
+        self.assertIn("decision_latency_seconds", below)
+        self.assertEqual(journal.cash, Decimal("48"))
+        low = journal.process(
+            "low", row(transaction_hash="0xlow", price="0.40"), market(),
+            book(asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.39", "size": "100"}]), NOW,
+        )
+        self.assertEqual(low["status"], "PAPER_BUY")
+        self.assertEqual(Decimal(low["shares"]), Decimal("5"))
+        self.assertLessEqual(Decimal(low["simulated_vwap"]), Decimal("0.40"))
+        above = journal.process(
+            "above", row(transaction_hash="0xabove", price="0.61"), market(),
+            book(asks=[{"price": "0.61", "size": "100"}], bids=[{"price": "0.60", "size": "100"}]), NOW,
+        )
+        self.assertEqual(above["reason"], "outside_copy_price_band")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("5"))
+        high = journal.process(
+            "high", row(transaction_hash="0xhigh", price="0.60", token_id="44444"),
+            market(clobTokenIds=["44444", TOKEN_DOWN]),
+            book(asset_id="44444", asks=[{"price": "0.60", "size": "100"}], bids=[{"price": "0.59", "size": "100"}]), NOW,
+        )
+        self.assertEqual(high["status"], "PAPER_BUY")
+        self.assertEqual(Decimal(high["our_price"]), Decimal("0.60"))
+        self.assertEqual(Decimal(high["cent_difference"]), Decimal("0"))
+
+    def test_exit_window_sells_only_inside_the_same_minute(self):
+        policy = config(exit_window_seconds=60)
+        journal = paper.PaperJournal(Path(self.tmp.name) / "window.sqlite", policy)
+        self.addCleanup(journal.db.close)
+        bought = journal.process("buy-1", row(timestamp=NOW - 10, price="0.50"), market(), book(), NOW)
+        self.assertEqual(bought["status"], "PAPER_BUY")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["entry_source_timestamp"], NOW - 10)
+        late_book = book(timestamp=(NOW + 80) * 1000, bids=[{"price": "0.90", "size": "100"}])
+        self.assertIsNone(journal.realize_if_bid_above_cost(market(), late_book, NOW + 80))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal(bought["shares"]))
+        inside = journal.realize_if_bid_above_cost(
+            market(), book(timestamp=NOW * 1000, bids=[{"price": "0.70", "size": "100"}]), NOW,
+        )
+        self.assertEqual(inside["status"], "PAPER_SELL")
+        self.assertGreater(Decimal(inside["realized_pnl_usd"]), 0)
+        self.assertEqual(inside["decision_latency_seconds"], 10)
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+
+    def test_fresh_trades_decides_the_newest_fill_first(self):
+        older = row(transaction_hash="0xold", timestamp=NOW - 5, price="0.41")
+        newer = row(transaction_hash="0xnew", timestamp=NOW - 1, price="0.59")
+        found = paper.fresh_trades([older, newer], lambda key: False, config(), NOW - 30)
+        self.assertEqual([item[1]["transaction_hash"] for item in found], ["0xnew", "0xold"])
+        self.assertEqual(paper.fresh_trades([older, newer], lambda key: key == found[0][0], config(), NOW - 30)[0][1]["transaction_hash"], "0xold")
+
 
 if __name__ == "__main__":
     unittest.main()
