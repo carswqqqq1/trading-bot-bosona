@@ -303,10 +303,12 @@ class PaperJournal:
             self.db.execute('INSERT INTO seen VALUES (?,?)',(key,json.dumps(decision)))
             return decision
 
-    def realize_if_bid_above_cost(self, market, book, now):
+    def realize_if_bid_above_cost(self, market, book, now, in_hand=False):
         """Sell paper shares when the bid is above average cost and nets a gain.
 
         This can realize a winner inside the window. It does not guarantee one.
+        An in-hand book is a quote we already fetched. Its exchange timestamp
+        can be older than the fetch, and that age does not delay the sell.
         """
         token = str(book.get('asset_id') or '')
         try:
@@ -317,9 +319,10 @@ class PaperJournal:
                     return None
                 if book.get('market') != position['row'].get('condition_id'):
                     return None
-                age = D(now)*1000-D(book['timestamp'])
-                if age < -1000 or age > D(self.config['max_book_age_seconds'])*1000:
-                    return None
+                if not in_hand:
+                    age = D(now)*1000-D(book['timestamp'])
+                    if age < -1000 or age > D(self.config['max_book_age_seconds'])*1000:
+                        return None
                 rate = fee_rate(market)
                 minimum = D(book['min_order_size'])
                 if minimum <= 0:
@@ -627,17 +630,26 @@ def main():
                     continue
                 if not exit_in_entry_minute(position['row'].get('timestamp'), now):
                     continue
-                # A same-minute sell uses the book already in hand. It does not GET.
+                # A same-minute sell uses the book already in hand. It does not GET,
+                # and it does not wait for the exchange timestamp to be under 5 seconds.
                 hit=quotes.take(token, position['row'].get('slug'), now, float(config['max_book_age_seconds']))
-                if not hit or not book_timestamp_fresh(hit[1], now):
+                if not hit:
                     continue
                 market, book, age = hit
                 try:
-                    exited=journal.realize_if_bid_above_cost(market,book,now)
+                    exchange_age=now-float(book['timestamp'])/1000.0
+                except (TypeError, ValueError, KeyError):
+                    exchange_age=None
+                try:
+                    exited=journal.realize_if_bid_above_cost(market,book,now,in_hand=True)
                     if exited:
                         exited['quote_source']='prefetch'
                         exited['book_fetch_seconds']=0.0
                         exited['quote_age_seconds']=round(age, 3)
+                        exited['remaining_wait_seconds']=round(age, 3)
+                        if exchange_age is not None:
+                            exited['book_exchange_timestamp_age_seconds']=round(exchange_age, 3)
+                        exited['wait_note']='In-hand quote. Remaining wait is the quote age. The exchange timestamp is not a sell gate.'
                         emit(exited)
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))
@@ -651,7 +663,7 @@ def main():
                 remaining=args.duration-(time.monotonic()-started)
                 if watch.connected.is_set():
                     try:
-                        pending_item=watch.queue.get(timeout=min(0.25,max(0,remaining)))
+                        pending_item=watch.queue.get(timeout=min(0.05,max(0,remaining)))
                     except queue.Empty:
                         pending_item=None
                     batch=[pending_item] if pending_item else []
