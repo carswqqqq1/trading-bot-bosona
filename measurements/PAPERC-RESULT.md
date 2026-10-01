@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), [the following log](paperc-fresh8-2026-10-01.jsonl), [the next log](paperc-fresh9-2026-10-01.jsonl), [the following log](paperc-fresh10-2026-10-01.jsonl), [the next log](paperc-fresh11-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), [the following log](paperc-fresh8-2026-10-01.jsonl), [the next log](paperc-fresh9-2026-10-01.jsonl), [the following log](paperc-fresh10-2026-10-01.jsonl), [the next log](paperc-fresh11-2026-10-01.jsonl), [the following log](paperc-fresh12-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -547,3 +547,40 @@ The sample-end book could not mark every position. The hourly book was stale, an
 | Equity reached $78 | yes; that sum is already above $78, and the other open shares are not a cash liability |
 
 Latency in seconds from his fill to each paper action: 2.425, 2.671, 2.869, 2.403, 2.783, 1.443, 3.394, 3.78, 1.443, 1.637.
+
+## Continued from $72.82406356
+
+The book was not reset and no rule was changed. The run resumed at cash $72.82406356 with the three positions still open at the stored costs. Cumulative realized P/L was $65.63230146. [Log](paperc-fresh12-2026-10-01.jsonl).
+
+One new position was bought and sold in the minute it opened. The bid was above paper cost, so the sell did not wait for a sell he printed. Latency is his opening fill to this sell.
+
+| Close | Shares | Price | Cost | Realized | Cash after | Unrealized | Equity | Equity reached $78 | Latency (seconds) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | ---: |
+| Down `btc-updown-5m-1790827500` | 10 | 0.1 | 0.85152 | 0.08548 | 72.90954356 | unset; the three resumed positions still open | unset | unset on this close | 3.211 |
+
+That cost is the stored buy cost, gross $0.800 plus fee $0.05152. The sell gross was $1.00 and the sell fee was $0.06300.
+
+Two resumed markets then published resolutions. Gamma `umaResolutionStatus` was `resolved` and `closed` was true. Both published `outcomePrices` `["1", "0"]` for `["Up", "Down"]`. Each paper close used the published Down price of 0 and the stored cost.
+
+| Close | Shares | Public price | Proceeds | Cost | Realized | Cash after | Unrealized | Equity | Equity reached $78 | Latency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |
+| Down `btc-updown-5m-1790827200` | 139.603158 | 0 | 0.000000 | 7.44433790 | -7.44433790 | 72.90954356 | unset; two positions still open | unset | unset on this close | none |
+| Down `bitcoin-up-or-down-september-30-2026-11pm-et` | 50 | 0 | 0.0 | 12.11985 | -12.11985 | 72.90954356 | unset; the 15-minute position still open | unset | unset on this close | none |
+
+The 5-minute `closedTime` was `2026-10-01 04:05:53+00`. The hourly `closedTime` was `2026-10-01 04:12:20.331118+00`. A public resolution is not one of his fills.
+
+The 15-minute market had no published resolution. Its bid quote is a mark, not a payout.
+
+| Open position | Shares | Cost | Liquidation quote |
+| --- | ---: | ---: | ---: |
+| Up `btc-updown-15m-1790827200` | 23.66 | 12.24405 | 23.63469 |
+
+| | USD |
+| --- | ---: |
+| Ending cash | 72.90954356 |
+| Realized P/L | 46.15359356 |
+| Unrealized P/L | 11.39064 |
+| Equity | 96.54423356 |
+| Equity reached $78 | yes |
+
+Latency in seconds from his fill to each paper action: 1.482, 1.432, 2.409, 1.437, 1.648, 1.844, 2.04, 2.239, 2.467, 2.424, 3.211, 2.452, 2.646, 2.893, 3.116, 2.422, 1.425. The two resolutions have no fill-to-action latency.
