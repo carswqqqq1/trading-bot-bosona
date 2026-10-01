@@ -711,7 +711,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
     observations, session_decisions, windows, equity_samples = {}, [], [], []
     rule_reset = None
     started = time.monotonic()
-    with Path(args.output).open('a') as output, ThreadPoolExecutor(max_workers=2) as pool:
+    with Path(args.output).open('a') as output, ThreadPoolExecutor(max_workers=4) as pool:
         def emit(record):
             line=json.dumps(record)
             output.write(line+'\n');output.flush();print(line,flush=True)
@@ -734,6 +734,14 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     exited['equity_reached_78'] = equity is not None and D(equity) >= D('78')
             emit(exited)
             remember(window_index, exited)
+
+        def minute_position_open():
+            minute = int(time.time()) // 60
+            for position in journal.holdings().values():
+                opened = position.get('opened_at')
+                if position['shares'] > 0 and opened is not None and int(D(opened)) // 60 == minute:
+                    return True
+            return False
 
         def sell_same_minute(window_index, market=None, book=None):
             if not config.get('sell_same_minute_if_bid_above_cost'):
@@ -801,8 +809,19 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                           paper=True,executed=False))
                 while time.monotonic()-window_started < args.duration:
                     next_request = time.monotonic()+config['poll_seconds']
+                    # A same-minute position sells on the first book whose bid clears
+                    # cost. The activity request must not hold that check.
+                    if minute_position_open():
+                        sell_same_minute(window_index)
                     try:
-                        rows=activity(config['leader_wallet'],max(source_start,int(time.time())-120),int(time.time()))
+                        activity_future=pool.submit(activity,config['leader_wallet'],max(source_start,int(time.time())-120),int(time.time()))
+                        while not activity_future.done() and minute_position_open() and time.monotonic()-window_started < args.duration:
+                            watched=time.monotonic()
+                            sell_same_minute(window_index)
+                            pause=config['poll_seconds']-(time.monotonic()-watched)
+                            if pause > 0 and not activity_future.done():
+                                time.sleep(pause)
+                        rows=activity_future.result()
                         for key,row in row_keys(rows):
                             if journal.contains(key):
                                 continue
@@ -846,6 +865,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                         remember(window_index, decision)
                                         if decision.get('status')=='PAPER_BUY':
                                             sell_same_minute(window_index, market, book)
+                                            sell_same_minute(window_index)
                                     else:
                                         reason=('paper_c_no_new_buys' if row['side']=='BUY'
                                                 else 'no_matching_paper_position')
@@ -859,7 +879,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                         next_request=max(next_request,time.monotonic()+0.5)
                     sell_same_minute(window_index)
                     remaining=args.duration-(time.monotonic()-window_started)
-                    if remaining > 0:
+                    if remaining > 0 and not minute_position_open():
                         time.sleep(min(max(0,next_request-time.monotonic()),remaining))
                 for close in journal.realize_public_resolutions(get_json, time.time()):
                     emit(close)
