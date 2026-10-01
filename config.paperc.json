@@ -15,5 +15,6 @@
   "max_outcome_cost_usd": "5.00",
   "max_book_age_seconds": 5,
   "strategy": "paper_c",
-  "copy_buys_at_or_better": true
+  "copy_buys_at_or_better": true,
+  "sell_same_minute_if_bid_above_cost": true
 }
