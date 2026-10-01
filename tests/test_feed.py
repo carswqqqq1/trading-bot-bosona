@@ -1,6 +1,6 @@
 import unittest
 
-from feed import fill_key, match_trade, row_from_activity, take_frames
+from feed import QuoteCache, fill_key, match_trade, row_from_activity, take_frames
 
 
 WALLET = "0x" + "ab" * 20
@@ -48,6 +48,18 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(row["timestamp"], 1_700_000_000)
         self.assertIsNone(match_trade(payload(), "0x" + "cd" * 20))
         self.assertIsNone(match_trade({"proxyWallet": WALLET}, WALLET))
+
+    def test_quote_cache_returns_a_young_book_for_the_same_market(self):
+        cache = QuoteCache()
+        market = {"slug": "btc-updown-5m-100"}
+        book = {"timestamp": 1}
+        cache.store("token", market, book, 10.0)
+        fresh = cache.take("token", "btc-updown-5m-100", 10.4, 1.0)
+        self.assertEqual(fresh[0], market)
+        self.assertEqual(fresh[1], book)
+        self.assertAlmostEqual(fresh[2], 0.4)
+        self.assertIsNone(cache.take("token", "btc-updown-5m-100", 11.2, 1.0))
+        self.assertIsNone(cache.take("token", "btc-updown-15m-100", 10.4, 1.0))
 
     def test_fill_key_matches_the_stream_trade_and_the_activity_row(self):
         streamed = row_from_activity(payload())

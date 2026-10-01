@@ -14,10 +14,12 @@ import ssl
 import struct
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal
+from urllib.parse import quote as urlquote
 from urllib.parse import urlsplit, urlencode
 
-from bot import decimal as D
+from bot import array, decimal as D
 
 
 HOST = "ws-live-data.polymarket.com"
@@ -203,12 +205,104 @@ class JsonClient:
                 pass
 
 
+class QuoteCache:
+    """Recent public book and market quotes, keyed by token."""
+
+    def __init__(self):
+        self._entries = {}
+        self._lock = threading.Lock()
+
+    def store(self, token, market, book, fetched_at):
+        self._lock.acquire()
+        try:
+            self._entries[str(token)] = (fetched_at, market, book)
+        finally:
+            self._lock.release()
+
+    def take(self, token, slug, now, max_age):
+        """Return (market, book, age_seconds) when the quote is still young."""
+        self._lock.acquire()
+        try:
+            item = self._entries.get(str(token))
+        finally:
+            self._lock.release()
+        if item is None:
+            return None
+        fetched_at, market, book = item
+        age = now - fetched_at
+        if age < 0 or age > max_age or market.get("slug") != slug:
+            return None
+        return market, book, age
+
+
+class BookPrefetcher:
+    """Keep the current BTC 5-minute and 15-minute books warm. No orders."""
+
+    def __init__(self, client, cache):
+        self.client = client
+        self.cache = cache
+        self.stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="book-prefetch", daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self.stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    def _run(self):
+        while not self.stop.is_set():
+            started = time.monotonic()
+            try:
+                self.refresh()
+            except Exception:
+                pass
+            remaining = 0.2 - (time.monotonic() - started)
+            if remaining > 0 and self.stop.wait(remaining):
+                return
+
+    def refresh(self):
+        now = int(time.time())
+        slugs = (
+            "btc-updown-5m-" + str(now - now % 300),
+            "btc-updown-15m-" + str(now - now % 900),
+        )
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            markets = {}
+            requests = {
+                pool.submit(self.client, "https://gamma-api.polymarket.com/markets/slug/" + urlquote(slug, safe="")): slug
+                for slug in slugs
+            }
+            for job in as_completed(requests):
+                try:
+                    markets[requests[job]] = job.result()
+                except Exception:
+                    continue
+            books = {}
+            for market in markets.values():
+                if not isinstance(market, dict) or not market.get("clobTokenIds"):
+                    continue
+                for token in array(market["clobTokenIds"]):
+                    books[pool.submit(self.client, "https://clob.polymarket.com/book", {"token_id": token})] = (token, market)
+            for job in as_completed(books):
+                token, market = books[job]
+                try:
+                    book = job.result()
+                except Exception:
+                    continue
+                self.cache.store(token, market, book, time.time())
+
+
 class ActivityWatch:
     """Queue his trades from the public activity stream as they arrive."""
 
-    def __init__(self, wallet, host=HOST):
+    def __init__(self, wallet, host=HOST, on_trade=None):
         self.wallet = wallet
         self.host = host
+        self.on_trade = on_trade
         self.queue = queue.Queue()
         self.stop = threading.Event()
         self.connected = threading.Event()
@@ -331,4 +425,11 @@ class ActivityWatch:
         except (ValueError, KeyError, TypeError):
             return
         if row is not None:
-            self.queue.put((time.time(), row, "activity_websocket"))
+            arrived = time.time()
+            prepared = None
+            if self.on_trade:
+                try:
+                    prepared = self.on_trade(row)
+                except Exception:
+                    prepared = None
+            self.queue.put((arrived, row, "activity_websocket", prepared))
