@@ -283,15 +283,20 @@ class PublicTradeFeed:
                 {'topic': 'activity', 'type': 'trades'}]}).encode())
             ssock.settimeout(1)
             last_ping = time.time()
+            last_frame = time.time()
             fragments = []
             while not self.stop.is_set():
+                if time.time() - last_frame > 15:
+                    raise ConnectionError('websocket_silent')
                 if time.time() - last_ping >= 5:
                     self._send(ssock, 1, b'PING')
                     last_ping = time.time()
                 try:
                     fin, opcode, payload, buf = self._read_frame(ssock, buf)
                 except socket.timeout:
+                    buf = getattr(self, '_pending', buf)
                     continue
+                last_frame = time.time()
                 if opcode == 8:
                     raise ConnectionError('websocket_closed')
                 if opcode == 9:
@@ -344,31 +349,36 @@ class PublicTradeFeed:
         ssock.sendall(bytes(header) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
 
     def _read_frame(self, ssock, buf):
-        while len(buf) < 2:
-            buf += self._recv(ssock)
-        length = buf[1] & 0x7f
-        index = 2
-        if length == 126:
-            while len(buf) < 4:
+        """Read one frame. A timeout keeps bytes already taken from the socket."""
+        try:
+            while len(buf) < 2:
                 buf += self._recv(ssock)
-            length = struct.unpack('!H', buf[2:4])[0]
-            index = 4
-        elif length == 127:
-            while len(buf) < 10:
+            length = buf[1] & 0x7f
+            index = 2
+            if length == 126:
+                while len(buf) < 4:
+                    buf += self._recv(ssock)
+                length = struct.unpack('!H', buf[2:4])[0]
+                index = 4
+            elif length == 127:
+                while len(buf) < 10:
+                    buf += self._recv(ssock)
+                length = struct.unpack('!Q', buf[2:10])[0]
+                index = 10
+            if length > 1_000_000:
+                raise ConnectionError('websocket_frame_too_large')
+            fin = bool(buf[0] & 0x80)
+            masked = buf[1] & 0x80
+            if masked:
+                while len(buf) < index + 4:
+                    buf += self._recv(ssock)
+                mask = buf[index:index+4]
+                index += 4
+            while len(buf) < index + length:
                 buf += self._recv(ssock)
-            length = struct.unpack('!Q', buf[2:10])[0]
-            index = 10
-        if length > 1_000_000:
-            raise ConnectionError('websocket_frame_too_large')
-        fin = bool(buf[0] & 0x80)
-        masked = buf[1] & 0x80
-        if masked:
-            while len(buf) < index + 4:
-                buf += self._recv(ssock)
-            mask = buf[index:index+4]
-            index += 4
-        while len(buf) < index + length:
-            buf += self._recv(ssock)
+        except socket.timeout:
+            self._pending = buf
+            raise
         payload = buf[index:index+length]
         if masked:
             payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))

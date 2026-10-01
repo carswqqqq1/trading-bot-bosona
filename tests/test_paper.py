@@ -356,6 +356,27 @@ class PaperJournalTests(unittest.TestCase):
         kept = paper.fresh_trades([older, newer], lambda key: False, config(), NOW - 30, preserve_order=True)
         self.assertEqual([item[1]["transaction_hash"] for item in kept], ["0xold", "0xnew"])
 
+    def test_socket_timeout_keeps_bytes_already_read(self):
+        class Sock:
+            def __init__(self):
+                self.calls = 0
+            def recv(self, _n):
+                self.calls += 1
+                if self.calls == 1:
+                    return bytes([0x81, 126])
+                raise paper.socket.timeout('timed out')
+
+        feed = paper.PublicTradeFeed('0x' + 'a' * 40)
+        sock = Sock()
+        with self.assertRaises(paper.socket.timeout):
+            feed._read_frame(sock, b'')
+        self.assertEqual(feed._pending[:2], bytes([0x81, 126]))
+        fin, opcode, payload, rest = feed._read_frame(type('S', (), {'recv': lambda self, n: paper.struct.pack('!H', 3) + b'abc'})(), feed._pending)
+        self.assertTrue(fin)
+        self.assertEqual(opcode, 1)
+        self.assertEqual(payload, b'abc')
+        self.assertEqual(rest, b'')
+
     def test_active_btc_slugs_include_the_open_5m_window(self):
         slugs = paper.active_btc_slugs(NOW)
         self.assertIn(f"btc-updown-5m-{NOW // 300 * 300}", slugs)
