@@ -14,17 +14,14 @@ one burst cannot spend the whole account. These rules do not guarantee a profit.
 
 strategy "paper_c" is a separate filter. A sell is copied only when it
 closes an existing paper position above paper cost. With no matching position
-the sell is skipped when it appears. copy_buys_at_or_better copies his buy on
-the same side and market, for his full size, only when that full size fills
-at his price or better. A better full-size price is a copy. A 5-share quote
-is not that price. The market minimum is still 5 shares. If that size costs
-more than the cash on hand, the buy is skipped and is not scaled down. The
-copy is a taker. On a new buy the fee is taken in shares, so the held count
-is his size minus fee divided by price. On a sell the fee comes out of the
-USDC proceeds. A resolution is not a fill and has no fee. Makers pay nothing. sell_same_minute_if_bid_above_cost is the one added rule: in the
-same minute a paper position opens, a bid above paper cost sells that position
-without waiting for a sell he prints. Decision latency is his fill timestamp to
-that copy or skip. The paper48 path is unchanged.
+the sell is skipped when it appears. copy_buys_at_or_better copies his side
+and market for five shares, and only when those five shares are on the book
+at his price or better. A smaller print of his is not copied unless the book
+has those five. The copy is a taker. On a new buy the fee is taken in shares.
+On a sell the fee comes out of the USDC proceeds. A resolution is not a fill
+and has no fee. Makers pay nothing. While a bid still clears paper cost, the
+position is sold in any minute so the gain becomes cash. Decision latency is
+his fill timestamp to that copy or skip. The paper48 path is unchanged.
 """
 import argparse
 import base64
@@ -451,28 +448,31 @@ class PaperJournal:
                     decision['realized_pnl_usd'] = str(net-removed_cost)
                     decision['fee_collected_in'] = 'usdc'
                 elif row['side']=='BUY' and self.config.get('strategy')=='paper_c' and self.config.get('copy_buys_at_or_better'):
-                    # His exact share count. The price is the full-size book VWAP.
-                    # A better VWAP copies. A cap at his tick used to drop that
-                    # size and report the 5-share price instead. Cash that cannot
-                    # cover the full size skips the buy and does not scale it down.
-                    quantity = source_shares
-                    if quantity < max(minimum, FIVE):
+                    # Five shares, his side and market, only when the book has
+                    # those five at his price or better. His larger size is not
+                    # required. Fewer than five at that price is not scaled down.
+                    if minimum > FIVE:
                         raise ValueError('below_market_minimum')
+                    quantity = FIVE
                     try:
-                        fill = quote(book,'BUY',quantity,rate)
+                        visible = quote(book,'BUY',quantity,rate)
                     except ValueError:
-                        raise ValueError('his_size_not_on_the_book')
-                    decision['simulated_vwap'] = str(fill['vwap'])
-                    if fill['vwap'] > source_price:
+                        raise ValueError('five_shares_not_at_his_price_or_better')
+                    decision['simulated_vwap'] = str(visible['vwap'])
+                    if visible['vwap'] > source_price:
                         raise ValueError('latency_worse_than_leader_price')
-                    # The book must hold his full size. The taker fee is then
-                    # taken in shares, not as extra USDC and not as a rebate.
+                    try:
+                        fill = quote(book,'BUY',quantity,rate,source_price)
+                    except ValueError:
+                        raise ValueError('five_shares_not_at_his_price_or_better')
+                    decision['simulated_vwap'] = str(fill['vwap'])
+                    # The taker fee is taken in shares, not as extra USDC.
                     received = quantity - fill['share_fee']
                     if received <= 0:
                         raise ValueError('taker_fee_consumed_the_shares')
                     debit = fill['gross']
                     if debit > self.cash:
-                        raise ValueError('his_size_exceeds_cash')
+                        raise ValueError('five_shares_exceed_cash')
                     cash = self.cash-debit
                     opening = position['shares'] == 0
                     position['shares'] += received
@@ -609,10 +609,11 @@ class PaperJournal:
             return None
 
     def realize_same_minute_if_bid_above_cost(self, market, book, now):
-        """Sell a paper position when the bid clears cost in its opening minute.
+        """Sell a paper position in any minute while the bid still clears cost.
 
-        This does not wait for a sell he prints. A later minute sells only while
-        the book is under its starting cash. The book must hold the full position.
+        This does not wait for a sell he prints. The gain is taken as cash
+        before the bid falls back through paper cost. The book must hold the
+        full position.
         """
         if not (self.config.get('strategy')=='paper_c' and self.config.get('sell_same_minute_if_bid_above_cost')):
             return None
@@ -624,11 +625,9 @@ class PaperJournal:
                 if not position or position['shares'] <= 0 or position['cost'] <= 0:
                     return None
                 opened = position.get('opened_at')
-                same_minute = opened is not None and int(D(opened)) // 60 == int(now) // 60
-                # While equity is under the start, a later bid above paper cost
-                # is sold too. That locks a gain instead of riding a loser out.
-                if opened is None or not (same_minute or self.sell_above_cost_while_losing):
+                if opened is None:
                     return None
+                same_minute = int(D(opened)) // 60 == int(now) // 60
                 if book.get('market') != position['row'].get('condition_id'):
                     return None
                 age = D(now)*1000-D(book['timestamp'])
@@ -655,7 +654,7 @@ class PaperJournal:
                 source_ts = position.get('opened_source_timestamp', position['row'].get('timestamp'))
                 latency = None if source_ts is None else round(now-int(source_ts), 3)
                 reason = ('same_minute_bid_above_paper_cost' if same_minute
-                          else 'losing_book_bid_above_paper_cost')
+                          else 'any_minute_bid_above_paper_cost')
                 decision = dict(status='PAPER_SELL',reason=reason,rule_skipped=False,
                                 paper=True,executed=False,side='SELL',slug=position['row'].get('slug'),
                                 outcome=position['row'].get('outcome'),token_id=token,
@@ -1009,7 +1008,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
     observations, session_decisions, windows, equity_samples = {}, [], [], []
     rule_reset = None
     started = time.monotonic()
-    with Path(args.output).open('a') as output, ThreadPoolExecutor(max_workers=4) as pool:
+    with Path(args.output).open('a') as output, ThreadPoolExecutor(max_workers=8) as pool:
         def emit(record):
             line=json.dumps(record)
             output.write(line+'\n');output.flush();print(line,flush=True)
@@ -1054,18 +1053,15 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         loss_checked = 0
 
         def sell_while_losing(window_index):
-            """After the opening minute, sell above paper cost only while equity is down."""
+            """Any minute, sell the position while the bid still clears paper cost."""
             nonlocal loss_checked
-            if not journal.sell_above_cost_while_losing:
+            if not config.get('sell_same_minute_if_bid_above_cost'):
                 return
             if time.monotonic()-loss_checked < 1:
                 return
             loss_checked = time.monotonic()
             for token, position in list(journal.holdings().items()):
                 if position['shares'] <= 0:
-                    continue
-                opened = position.get('opened_at')
-                if opened is not None and int(D(opened)) // 60 == int(time.time()) // 60:
                     continue
                 try:
                     market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
@@ -1109,13 +1105,12 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         open_shares = sum((p['shares'] for p in journal.holdings().values()), ZERO)
         sample_reset = (bool(config.get('sell_same_minute_if_bid_above_cost'))
                         and journal.cash == D(config['starting_cash_usd']) and open_shares == 0)
-        buy_filter = ('copy his exact share count, same side and market, only when the full size fills at his price or better; '
-                      'skip when that size is not on the book or costs more than cash; '
+        buy_filter = ('copy his side and market for five shares, only when those five are on the book at his price or better; '
+                      'skip when five shares are not at that price or cost more than cash; '
                       'a new buy pays the taker fee in shares and a new sell pays it from USDC proceeds; '
                       'copy a sell he prints only when it closes an existing paper position above paper cost')
         if config.get('sell_same_minute_if_bid_above_cost'):
-            buy_filter += ('; in the opening minute, sell when the bid is above paper cost without waiting for his sell'
-                           '; while quoted equity is under the starting cash, that same bid sells after the opening minute too')
+            buy_filter += '; in any minute, sell while the bid still clears paper cost so the gain becomes cash'
         emit(dict(status='STARTED',strategy='paper_c',paper=True,executed=False,live_orders=False,
                   leader_wallet=config['leader_wallet'],starting_cash_usd=str(config['starting_cash_usd']),
                   resumed_cash_usd=str(journal.cash),
@@ -1158,6 +1153,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                 pass
         feed = LeaderTradeFeed(config['leader_wallet'])
         feed.start()
+        hit_cash_goal = False
         try:
             window_index = 1
             while True:
@@ -1167,7 +1163,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                 window_decisions = []
                 emit(dict(status='WINDOW_START',window=window_index,cash_usd=str(journal.cash),
                           paper=True,executed=False))
-                while time.monotonic()-window_started < args.duration:
+                while time.monotonic()-window_started < args.duration and not hit_cash_goal:
                     next_request = time.monotonic()+config['poll_seconds']
                     # A same-minute position sells on the first book whose bid clears
                     # cost. The activity request must not hold that check.
@@ -1215,6 +1211,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                         for live in feed.drain():
                             incoming.append((trade_ident(live) or json.dumps(live,default=str), live))
                         incoming.extend(row_keys(rows))
+                        queued=[]
                         for key,row in incoming:
                             if not key or journal.contains(key):
                                 continue
@@ -1239,39 +1236,49 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                           source_to_first_seen_seconds=round(delay,3),
                                           continuous_run_latency_sample=observations[key]['continuous_sample'],
                                           seen_before_run_start=not observations[key]['continuous_sample']))
+                            if int(row['timestamp']) < run_started_wall:
+                                decision = journal.process(key,row,{},{},appeared,
+                                                           skip_reason='resume_backlog_not_copied')
+                                emit(decision)
+                                remember(window_index, decision)
+                                continue
+                            held = journal.holdings().get(str(row['token_id']))
+                            sell_can_close = row['side']=='SELL' and held and held['shares']>0
+                            # A buy needs the book the moment it appears, to see if
+                            # five shares are at his price or better. A sell with no
+                            # position is still skipped before that read.
+                            needs_book = sell_can_close or (row['side']=='BUY' and config.get('copy_buys_at_or_better'))
+                            if needs_book:
+                                # Ask for every book in the burst together so a later
+                                # fill is not waiting on the earlier round trips.
+                                queued.append((key,row,ident,appeared,
+                                               pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'],safe='')),
+                                               pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':row['token_id']})))
+                            else:
+                                reason=('paper_c_no_new_buys' if row['side']=='BUY'
+                                        else 'no_matching_paper_position')
+                                decision=journal.process(key,row,{},{},appeared,skip_reason=reason)
+                                emit(decision)
+                                remember(window_index, decision)
+                        for index,(key,row,ident,appeared,market_future,book_future) in enumerate(queued):
                             try:
-                                if int(row['timestamp']) < run_started_wall:
-                                    decision = journal.process(key,row,{},{},appeared,
-                                                               skip_reason='resume_backlog_not_copied')
-                                    emit(decision)
-                                    remember(window_index, decision)
-                                else:
-                                    held = journal.holdings().get(str(row['token_id']))
-                                    sell_can_close = row['side']=='SELL' and held and held['shares']>0
-                                    # A buy needs the book the moment it appears, to see if
-                                    # the ask is at his price or better. A sell with no
-                                    # position is still skipped before that read.
-                                    needs_book = sell_can_close or (row['side']=='BUY' and config.get('copy_buys_at_or_better'))
-                                    if needs_book:
-                                        market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'],safe=''))
-                                        book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':row['token_id']})
-                                        market,book=market_future.result(),book_future.result()
-                                        acted=time.time()
-                                        decision=journal.process(key,row,market,book,acted)
-                                        emit(decision)
-                                        remember(window_index, decision)
-                                        if decision.get('status')=='PAPER_BUY':
-                                            sell_same_minute(window_index, market, book)
-                                            sell_same_minute(window_index)
-                                    else:
-                                        reason=('paper_c_no_new_buys' if row['side']=='BUY'
-                                                else 'no_matching_paper_position')
-                                        decision=journal.process(key,row,{},{},appeared,skip_reason=reason)
-                                        emit(decision)
-                                        remember(window_index, decision)
+                                market,book=market_future.result(),book_future.result()
+                                acted=time.time()
+                                decision=journal.process(key,row,market,book,acted)
+                                emit(decision)
+                                remember(window_index, decision)
+                                if decision.get('status')=='PAPER_BUY':
+                                    sell_same_minute(window_index, market, book)
+                                    sell_same_minute(window_index)
+                                if args.until_goal and journal.cash >= paper_goal(config):
+                                    hit_cash_goal = True
+                                    break
                             except RateLimited as exc:
                                 if ident:
                                     journal.unclaim(ident)
+                                for later in queued[index+1:]:
+                                    if later[2]:
+                                        journal.unclaim(later[2])
                                 rate_hold = exc.retry_after
                                 emit(dict(status='ERROR',message=str(exc),event_id=key,
                                           retry_after_seconds=exc.retry_after))
@@ -1320,17 +1327,12 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                      open_cost_usd=port['open_cost_usd'],paper=True,executed=False)
                 windows.append(window_record)
                 emit(window_record)
-                if equity is not None:
-                    losing = equity < D(config['starting_cash_usd'])
-                    if losing and not journal.sell_above_cost_while_losing:
-                        emit(dict(status='LOSS_ADJUSTMENT',paper=True,executed=False,
-                                  cash_usd=str(journal.cash),equity_usd=str(equity),
-                                  rule='sell_above_cost_while_losing',
-                                  note='Equity is under the starting cash, so a bid above paper cost sells even after the opening minute.'))
-                    journal.sell_above_cost_while_losing = losing
-                if args.until_goal and equity is not None and equity >= paper_goal(config):
+                if args.until_goal and journal.cash >= paper_goal(config):
+                    hit_cash_goal = True
+                if hit_cash_goal:
                     emit(dict(status='GOAL',paper=True,executed=False,goal_usd=str(paper_goal(config)),
-                              equity_usd=str(equity),
+                              cash_usd=str(journal.cash),
+                              equity_usd=None if equity is None else str(equity),
                               seconds_from_start_to_goal=round(time.time()-observer_start,3)))
                     break
                 window_index += 1
@@ -1355,7 +1357,28 @@ def run_paper_c(args, config, journal, observer_start, source_start):
     if args.result:
         ending_equity = final.get('equity_at_liquidation_quote_usd')
         goal = paper_goal(config)
-        goal_reached = ending_equity is not None and D(ending_equity) >= goal
+        goal_reached = D(final['cash_usd']) >= goal
+        buy_latencies = []
+        buy_count = 0
+        for (payload,) in journal.db.execute('SELECT payload FROM seen'):
+            try:
+                seen_row = json.loads(payload)
+            except (TypeError, ValueError):
+                continue
+            if seen_row.get('status') != 'PAPER_BUY':
+                continue
+            buy_count += 1
+            lat = seen_row.get('decision_latency_seconds')
+            if isinstance(lat, (int, float)) and lat >= 0:
+                buy_latencies.append(lat)
+        buy_latencies.sort()
+        if not buy_latencies:
+            median_buy_latency = None
+        elif len(buy_latencies) % 2:
+            median_buy_latency = buy_latencies[len(buy_latencies)//2]
+        else:
+            mid = len(buy_latencies)//2
+            median_buy_latency = (buy_latencies[mid-1] + buy_latencies[mid]) / 2
         result=dict(name='Paper C',paper_only=True,live_orders=False,private_keys_used=False,brez_used=False,
                     leader_wallet=config['leader_wallet'],leader_handle='@bosona',
                     starting_cash_usd=str(D(config['starting_cash_usd'])),
@@ -1394,19 +1417,21 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                  reason=d.get('reason'),our_price=d.get('our_price'))
                             for d in session_decisions
                             if d.get('status')=='PAPER_RESOLUTION' or d.get('reason') in (
-                                'same_minute_bid_above_paper_cost', 'losing_book_bid_above_paper_cost')],
+                                'same_minute_bid_above_paper_cost', 'any_minute_bid_above_paper_cost')],
                     book_was_steadily_losing=rule_reset is not None,
-                    goal_usd=str(goal),goal_reached=goal_reached,
+                    goal_usd=str(goal),goal_reached=goal_reached,goal_measures='cash',
+                    open_cost_usd=final.get('open_cost_usd'),
+                    fees_usd=final.get('total_simulated_fees_usd'),
+                    buys=buy_count,median_buy_latency_seconds=median_buy_latency,
                     seconds_from_start_to_goal=(round(time.time()-observer_start,3) if goal_reached else None),
                     poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
-                    filter=('Copy his exact share count, same side and market, only when the full size fills at his price or better. '
-                            'Skip that buy when the size is not on the book or costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. '
+                    filter=('Copy his side and market for five shares, only when those five fill at his price or better. '
+                            'Skip that buy when five shares are not at that price or cost more than the cash on hand. '
                             'A new fill is a taker. The crypto fee is shares times 0.07 times price times one minus price, rounded to five decimals. '
                             'On a buy that fee is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee. '
                             'Copy a sell he prints only when it closes an existing paper position above paper cost. '
-                            'In the same minute a position opens, sell it when the bid is above paper cost without waiting for a sell he prints. '
-                            'While quoted equity is under the starting cash, that same bid sells after the opening minute too.'
+                            'In any minute, sell the position while the bid still clears paper cost so the gain becomes cash.'
                             if config.get('sell_same_minute_if_bid_above_cost') else
                             'Copy his exact share count, same side and market, only when the book fills at his price or better. '
                             'Skip that buy when the size costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. '
