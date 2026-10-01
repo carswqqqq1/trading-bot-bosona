@@ -4,7 +4,8 @@ No orders are submitted. His public trades are taken from the activity stream
 and paper-copied on that same side and market as soon as the trade arrives.
 If the stream drops, the public activity API is read again immediately, with
 no idle poll. Fees use Gamma feeSchedule and the documented formula
-https://docs.polymarket.com/trading/fees (verified 2026-09-30). No settlement.
+https://docs.polymarket.com/trading/fees (verified 2026-09-30). A resolved
+position is paid 0 or 1 per share only from a public resolution.
 SELL fraction uses source holdings observed during this session only; earlier
 leader inventory is unknown and unmatched SELLs are refused.
 
@@ -370,6 +371,41 @@ class PaperJournal:
         except Exception:
             return None
 
+    def settle_resolved(self, token, payout_per_share, resolved_outcome, source):
+        """Pay an open paper position 0 or 1 per share and close it.
+
+        The caller supplies a public resolution. This does not choose a payout
+        and it does not submit a redeem or an order.
+        """
+        payout = D(payout_per_share)
+        if payout not in (ZERO, Decimal('1')):
+            raise ValueError('resolution_payout_not_zero_or_one')
+        token = str(token)
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            position = self.holdings().get(token)
+            if not position or position['shares'] <= 0:
+                raise ValueError('no_open_position')
+            shares, cost = position['shares'], position['cost']
+            payout_usd = shares * payout
+            realized = payout_usd - cost
+            cash = self.cash + payout_usd
+            position['shares'] = ZERO
+            position['cost'] = ZERO
+            decision = dict(status='SETTLEMENT',paper=True,executed=False,live_order_sent=False,
+                            side='SETTLE',slug=position['row'].get('slug'),
+                            outcome=position['row'].get('outcome'),resolved_outcome=resolved_outcome,
+                            token_id=token,shares=str(shares),payout_per_share=str(payout),
+                            payout_usd=str(payout_usd),cost_usd=str(cost),
+                            realized_pnl_usd=str(realized),cash_usd=str(cash),
+                            resolution_source=source)
+            self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
+            self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
+                            (token,json.dumps(position,default=str)))
+            self.db.execute('INSERT INTO seen VALUES (?,?)',
+                            ('settlement:'+token,json.dumps(decision)))
+            return decision
+
     def portfolio(self, fetch=get_json):
         positions, marked, unknown = [],ZERO,0
         for token,p in self.holdings().items():
@@ -393,9 +429,11 @@ class PaperJournal:
                 unknown += 1
                 record['unresolved_reason'] = str(exc)
             positions.append(record)
-        fills = [json.loads(x[0]) for x in self.db.execute('SELECT payload FROM seen')]
-        fills = [x for x in fills if x['status'] in ('PAPER_BUY','PAPER_SELL')]
+        records = [json.loads(x[0]) for x in self.db.execute('SELECT payload FROM seen')]
+        fills = [x for x in records if x['status'] in ('PAPER_BUY','PAPER_SELL')]
+        settlements = [x for x in records if x['status']=='SETTLEMENT']
         realized = sum((D(x.get('realized_pnl_usd','0')) for x in fills),ZERO)
+        realized += sum((D(x.get('realized_pnl_usd','0')) for x in settlements),ZERO)
         open_cost = sum((p['cost'] for p in self.holdings().values()),ZERO)
         result = dict(status='PORTFOLIO',cash_usd=str(self.cash),positions=positions,
                       unresolved_positions=unknown,quoted_liquidation_usd=str(marked),settlement_simulated=False)
@@ -453,7 +491,7 @@ def main():
     prior=[json.loads(item[0]) for item in journal.db.execute('SELECT payload FROM seen')]
     sample_start_cash=journal.cash
     sample_start_realized=sum((D(item.get('realized_pnl_usd','0')) for item in prior
-                               if item.get('status') in ('PAPER_BUY','PAPER_SELL')), ZERO)
+                               if item.get('status') in ('PAPER_BUY','PAPER_SELL','SETTLEMENT')), ZERO)
     started, observations, pending, attempts = time.monotonic(), {}, {}, {}
     stopped_for_cash=False
     with Path(args.output).open('a') as output, ThreadPoolExecutor(max_workers=4) as pool:

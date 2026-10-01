@@ -324,6 +324,52 @@ class PaperJournalTests(unittest.TestCase):
         self.assertGreater(Decimal(report["realized_pnl_usd"]), 0)
 
 
+class SettlementTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "paper.sqlite"
+        self.journal = paper.PaperJournal(self.path, config())
+
+    def test_losing_resolution_pays_zero_and_realizes_the_cost(self):
+        bought = self.journal.process("buy-1", row(size="5", price="0.50"), market(), book(), NOW)
+        cost = Decimal(bought["gross"]) + Decimal(bought["fee"])
+        cash_after_buy = self.journal.cash
+        settled = self.journal.settle_resolved(TOKEN_UP, "0", "Down", "gamma")
+        self.assertEqual(settled["status"], "SETTLEMENT")
+        self.assertEqual(settled["resolved_outcome"], "Down")
+        self.assertEqual(Decimal(settled["payout_per_share"]), 0)
+        self.assertEqual(Decimal(settled["payout_usd"]), 0)
+        self.assertEqual(self.journal.cash, cash_after_buy)
+        self.assertEqual(Decimal(settled["realized_pnl_usd"]), -cost)
+        self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"], 0)
+        self.assertEqual(self.journal.holdings()[TOKEN_UP]["cost"], 0)
+        report = self.journal.portfolio(lambda url, params=None: None)
+        self.assertEqual(Decimal(report["realized_pnl_usd"]), -cost)
+        self.assertEqual(Decimal(report["open_cost_usd"]), 0)
+        self.assertEqual(report["unresolved_positions"], 0)
+        self.assertEqual(Decimal(report["equity_at_liquidation_quote_usd"]), self.journal.cash)
+
+    def test_winning_resolution_pays_one_per_share(self):
+        bought = self.journal.process("buy-1", row(size="5", price="0.50"), market(), book(), NOW)
+        shares = Decimal(bought["shares"])
+        cost = Decimal(bought["gross"]) + Decimal(bought["fee"])
+        cash_after_buy = self.journal.cash
+        settled = self.journal.settle_resolved(TOKEN_UP, "1", "Up", "gamma")
+        self.assertEqual(self.journal.cash, cash_after_buy + shares)
+        self.assertEqual(Decimal(settled["payout_usd"]), shares)
+        self.assertEqual(Decimal(settled["realized_pnl_usd"]), shares - cost)
+        self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"], 0)
+
+    def test_settlement_rejects_a_payout_between_zero_and_one(self):
+        bought = self.journal.process("buy-1", row(size="5"), market(), book(), NOW)
+        cash_after_buy = self.journal.cash
+        with self.assertRaises(ValueError):
+            self.journal.settle_resolved(TOKEN_UP, "0.5", "Up", "gamma")
+        self.assertEqual(self.journal.cash, cash_after_buy)
+        self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"], Decimal(bought["shares"]))
+
+
 class EntryMinuteExitTests(unittest.TestCase):
     def test_exit_qualifies_only_within_sixty_seconds_of_his_fill(self):
         self.assertTrue(paper.exit_in_entry_minute(1000, 1000))
