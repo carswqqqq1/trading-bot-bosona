@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), [the fresh log](paperc-fresh-2026-10-01.jsonl), [the continued log](paperc-fresh2-2026-10-01.jsonl), [the next continued log](paperc-fresh3-2026-10-01.jsonl), [the following log](paperc-fresh4-2026-10-01.jsonl), [the next log](paperc-fresh5-2026-10-01.jsonl), [the following log](paperc-fresh6-2026-10-01.jsonl), [the next log](paperc-fresh7-2026-10-01.jsonl), [the following log](paperc-fresh8-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -426,3 +426,37 @@ The 15-minute market had no published resolution. Its book was stale at the end,
 | Equity reached $78 | yes |
 
 Latency in seconds from his fill to each paper action: 0.418, 2.016, 1.93, 2.71, 3.311, 1.422, 1.451, 1.655, 1.847, 2.048, 2.45, 2.661, 2.461, 1.466. The resolution has no fill-to-action latency.
+
+## Continued from $81.76693006
+
+The book was not reset and no rule was changed. The run resumed at cash $81.76693006 with 36 Up shares of `btc-updown-15m-1790824500` still open, cost $8.35243. Cumulative realized P/L was $51.11936006. [Log](paperc-fresh8-2026-10-01.jsonl).
+
+That market published a resolution. Gamma `umaResolutionStatus` was `resolved`, the market was closed, and `outcomePrices` were `["1", "0"]` for `["Up", "Down"]`, `closedTime` `2026-10-01 03:30:56+00`. The paper close used the published Up price of 1 and the stored cost.
+
+| Close | Shares | Public price | Proceeds | Cost | Realized | Cash after | Unrealized | Equity | Equity reached $78 | Latency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| Up `btc-updown-15m-1790824500` | 36 | 1 | 36.0 | 8.35243 | 27.64757 | 117.76693006 | 0 | 117.76693006 | yes | none |
+
+Two buys then copied his exact share count at a full-size price below his price. No same-minute sell printed.
+
+| Buy | Shares | His price | Our price | Gross | Fee | Cash after | Latency (seconds) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Down `btc-updown-5m-1790825700` | 34.920635 | 0.3700000014 | 0.36 | 12.57142860 | 0.56320 | 104.63230146 | 2.476 |
+| Down `bitcoin-up-or-down-september-30-2026-11pm-et` | 50 | 0.24 | 0.23 | 11.500 | 0.61985 | 92.51245146 | 2.832 |
+
+The sample-end book could not mark both positions. The 5-minute book had insufficient depth, and that gap was not used as a price. The hourly position had a liquidation quote of $6.10415.
+
+| Open position | Shares | Cost | Liquidation quote |
+| --- | ---: | ---: | ---: |
+| Down `btc-updown-5m-1790825700` | 34.920635 | 13.13462860 | not quoted; insufficient depth |
+| Down `bitcoin-up-or-down-september-30-2026-11pm-et` | 50 | 12.11985 | 6.10415 |
+
+| | USD |
+| --- | ---: |
+| Ending cash | 92.51245146 |
+| Realized P/L | 78.76693006 |
+| Unrealized P/L | not quoted |
+| Equity | not quoted; cash is 92.51245146, so equity stays above $78 |
+| Equity reached $78 | yes |
+
+Latency in seconds from his fill to each paper action: 3.429, 3.627, 3.83, 4.018, 1.448, 1.46, 1.411, 2.434, 2.476, 1.787, 2.832, 2.409, 2.411. The resolution has no fill-to-action latency.
