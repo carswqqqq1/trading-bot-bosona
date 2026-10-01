@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -293,6 +294,121 @@ class PaperJournalTests(unittest.TestCase):
         self.assertGreater(self.journal.cash, Decimal("48") - Decimal(bought["gross"]) - Decimal(bought["fee"]))
         report = self.journal.portfolio(lambda url, params=None: market() if "/markets/slug/" in url else book(timestamp=NOW * 1000))
         self.assertGreater(Decimal(report["realized_pnl_usd"]), 0)
+
+
+def paper_c_config(**overrides):
+    result = config(strategy="paper_c", starting_cash_usd="39", max_open_cost_usd="38",
+                    max_daily_proposed_usd="39")
+    result.update(overrides)
+    return result
+
+
+def seed_position(journal, shares, cost):
+    payload = json.dumps({"row": row(), "shares": str(shares), "cost": str(cost), "leader_shares": str(shares)})
+    journal.db.execute("INSERT OR REPLACE INTO positions VALUES (?,?)", (TOKEN_UP, payload))
+    journal.db.commit()
+
+
+class PaperCTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def journal(self, **overrides):
+        path = Path(self.tmp.name) / f"paperc-{len(list(Path(self.tmp.name).iterdir()))}.sqlite"
+        journal = paper.PaperJournal(path, paper_c_config(**overrides))
+        self.addCleanup(journal.db.close)
+        return journal
+
+    def test_buy_is_skipped_without_a_book_or_a_new_position(self):
+        journal = self.journal()
+        result = journal.process("buy-1", row(price="0.42"), None, None, NOW)
+        self.assertEqual(result["status"], "SKIP")
+        self.assertEqual(result["reason"], "paper_c_no_new_buys")
+        self.assertEqual(result["side"], "BUY")
+        self.assertEqual(result["his_price"], "0.42")
+        self.assertIsNone(result["our_price"])
+        self.assertIsNone(result["cent_gap"])
+        self.assertEqual(result["decision_latency_seconds"], NOW - (NOW - 1))
+        self.assertEqual(result["realized_pnl_usd"], "0")
+        self.assertEqual(result["unrealized_pnl_usd"], "0")
+        self.assertEqual(journal.cash, Decimal("39"))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+
+    def test_buy_with_a_tradable_book_still_does_not_open(self):
+        journal = self.journal()
+        result = journal.process("buy-book", row(), market(), book(), NOW)
+        self.assertEqual(result["reason"], "paper_c_no_new_buys")
+        self.assertEqual(journal.cash, Decimal("39"))
+        self.assertEqual(sum((p["shares"] for p in journal.holdings().values()), Decimal(0)), 0)
+
+    def test_sell_without_a_position_is_skipped_even_when_the_bid_is_rich(self):
+        journal = self.journal()
+        result = journal.process(
+            "sell-flat", row(side="SELL", price="0.90", transaction_hash="0xs"),
+            market(), book(bids=[{"price": "0.90", "size": "100"}]), NOW,
+        )
+        self.assertEqual(result["status"], "SKIP")
+        self.assertEqual(result["reason"], "no_matching_paper_position")
+        self.assertEqual(result["side"], "SELL")
+        self.assertIsNone(result["our_price"])
+        self.assertEqual(journal.cash, Decimal("39"))
+
+    def test_sell_closes_a_matching_position_only_above_paper_cost(self):
+        journal = self.journal()
+        seed_position(journal, "5", "2")
+        blocked = journal.process(
+            "sell-cheap", row(side="SELL", price="0.30", transaction_hash="0xcheap"),
+            market(), book(bids=[{"price": "0.30", "size": "100"}]), NOW,
+        )
+        self.assertEqual(blocked["status"], "SKIP")
+        self.assertEqual(blocked["reason"], "sell_not_above_paper_cost")
+        self.assertEqual(journal.cash, Decimal("39"))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("5"))
+        copied = journal.process(
+            "sell-gain", row(side="SELL", price="0.60", transaction_hash="0xgain"),
+            market(), book(bids=[{"price": "0.60", "size": "100"}]), NOW,
+        )
+        self.assertEqual(copied["status"], "PAPER_SELL")
+        self.assertEqual(copied["side"], "SELL")
+        self.assertEqual(copied["slug"], row()["slug"])
+        self.assertEqual(copied["his_price"], "0.60")
+        self.assertEqual(copied["our_price"], "0.60")
+        self.assertEqual(Decimal(copied["cent_gap"]), Decimal("0"))
+        self.assertGreater(Decimal(copied["realized_pnl_usd"]), 0)
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+        self.assertGreater(journal.cash, Decimal("39"))
+        self.assertEqual(copied["unrealized_pnl_usd"], "0")
+
+    def test_tightened_sell_rule_refuses_a_fill_below_his_price(self):
+        journal = self.journal(sell_must_match_his_price=True)
+        seed_position(journal, "5", "2")
+        result = journal.process(
+            "sell-short", row(side="SELL", price="0.70", transaction_hash="0xshort"),
+            market(), book(bids=[{"price": "0.60", "size": "100"}]), NOW,
+        )
+        self.assertEqual(result["status"], "SKIP")
+        self.assertEqual(result["reason"], "sell_worse_than_his_price")
+        self.assertEqual(journal.cash, Decimal("39"))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("5"))
+
+    def test_steady_loss_resets_cash_and_changes_one_rule(self):
+        self.assertFalse(paper.steadily_losing([Decimal("39"), Decimal("39"), Decimal("39")]))
+        self.assertFalse(paper.steadily_losing([Decimal("39"), Decimal("38"), Decimal("38")]))
+        self.assertFalse(paper.steadily_losing([Decimal("39"), Decimal("40"), Decimal("41")]))
+        self.assertTrue(paper.steadily_losing([Decimal("39"), Decimal("37"), Decimal("35")]))
+        journal = self.journal()
+        seed_position(journal, "5", "2")
+        journal.db.execute("UPDATE meta SET value=? WHERE key='cash'", ("30",))
+        journal.db.commit()
+        reset = journal.apply_one_rule_reset()
+        self.assertEqual(reset["rule_changed"], "sell_must_match_his_price")
+        self.assertTrue(reset["open_book_dropped"])
+        self.assertEqual(journal.cash, Decimal("39"))
+        self.assertEqual(journal.holdings(), {})
+        self.assertTrue(journal.config["sell_must_match_his_price"])
+        with self.assertRaises(ValueError):
+            journal.apply_one_rule_reset()
 
 
 if __name__ == "__main__":
