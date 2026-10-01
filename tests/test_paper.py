@@ -342,8 +342,21 @@ class PaperJournalTests(unittest.TestCase):
         )
         self.assertFalse(below["bid_above_cost"])
         self.assertFalse(below["qualifies"])
-        report = self.journal.portfolio(lambda url, params=None: market() if "/markets/slug/" in url else book(timestamp=NOW * 1000))
-        self.assertGreater(Decimal(report["realized_pnl_usd"]), 0)
+        held_now = self.journal.holdings()[TOKEN_UP]
+        self.assertGreater(held_now["shares"], 0)
+        refused = self.journal.realize_if_bid_above_cost(
+            market(), book(timestamp=NOW * 1000, bids=[{"price": "0.40", "size": "100"}]), NOW + 2,
+        )
+        self.assertIsNone(refused)
+        flattened = self.journal.realize_if_bid_above_cost(
+            market(), book(timestamp=NOW * 1000, bids=[{"price": "0.40", "size": "100"}]), NOW + 2,
+            allow_loss=True,
+        )
+        self.assertEqual(flattened["status"], "PAPER_SELL")
+        self.assertEqual(flattened["reason"], "same_minute_flatten_at_loss")
+        self.assertLess(Decimal(flattened["realized_pnl_usd"]), 0)
+        self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"], 0)
+        self.assertEqual(Decimal(flattened["vwap"]), Decimal("0.40"))
 
 
 class SettlementTests(unittest.TestCase):

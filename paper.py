@@ -12,7 +12,9 @@ leader inventory is unknown and unmatched SELLs are refused.
 BUY copies keep his side and market only when the live book can buy the
 5-share minimum at his fill price or better. If latency has already moved the
 ask above that price, the buy is skipped. A paper position is sold inside the
-same window when the bid is above its average cost and the sale nets a gain.
+same minute when the bid is above its average cost and the sale nets a gain.
+If that bid does not clear paper cost in the minute of the buy, the position
+is flattened at the in-hand bid in that same minute, even at a loss.
 Open cost stays under max_open_cost_usd, which is below the cash balance, so
 one burst cannot spend the whole account. These rules do not guarantee a profit.
 """
@@ -339,12 +341,14 @@ class PaperJournal:
             self.db.execute('INSERT INTO seen VALUES (?,?)',(key,json.dumps(decision)))
             return decision
 
-    def realize_if_bid_above_cost(self, market, book, now, in_hand=False):
+    def realize_if_bid_above_cost(self, market, book, now, in_hand=False, allow_loss=False, reason=None):
         """Sell paper shares when the bid is above average cost and nets a gain.
 
         This can realize a winner inside the window. It does not guarantee one.
         An in-hand book is a quote we already fetched. Its exchange timestamp
         can be older than the fetch, and that age does not delay the sell.
+        allow_loss flattens at the bid even below paper cost. The caller uses
+        that only at the end of the entry minute, or for an explicit close-out.
         """
         token = str(book.get('asset_id') or '')
         try:
@@ -364,18 +368,21 @@ class PaperJournal:
                 if minimum <= 0:
                     return None
                 cost_per = position['cost']/position['shares']
-                bids = [level for level in levels(book,'SELL') if level[0] > cost_per]
+                all_bids = levels(book,'SELL')
+                bids = all_bids if allow_loss else [level for level in all_bids if level[0] > cost_per]
                 if not bids:
                     return None
                 available = sum((size for _,size in bids), ZERO)
                 quantity = min(position['shares'], available).quantize(STEP, rounding=ROUND_DOWN)
                 if quantity < minimum or quantity <= 0:
                     return None
-                fill = quote(book,'SELL',quantity,rate,cost_per)
+                fill = quote(book,'SELL',quantity,rate,None if allow_loss else cost_per)
                 removed = position['cost']*quantity/position['shares']
                 net = fill['gross']-fill['fee']
-                if net <= removed:
+                if not allow_loss and net <= removed:
                     return None
+                if reason is None:
+                    reason = 'bid_above_paper_cost' if net > removed else 'same_minute_flatten_at_loss'
                 cash = self.cash+net
                 position['cost'] -= removed
                 position['shares'] -= quantity
@@ -383,7 +390,7 @@ class PaperJournal:
                     position['cost'] = ZERO
                 self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
                 source_ts = position['row'].get('timestamp')
-                decision = dict(status='PAPER_SELL',reason='bid_above_paper_cost',rule_skipped=False,
+                decision = dict(status='PAPER_SELL',reason=reason,rule_skipped=False,
                                 paper=True,executed=False,live_order_sent=False,side='SELL',
                                 slug=position['row'].get('slug'),
                                 outcome=position['row'].get('outcome'),token_id=token,
@@ -687,16 +694,20 @@ def main():
                     state['first_above']=now
                 if preview and preview.get('qualifies') and state['first_qualifying'] is None:
                     state['first_qualifying']=now
-                if not preview or not preview.get('qualifies'):
+                minute_age=now-int(source_ts) if source_ts is not None else None
+                # A gain sells immediately. If the bid still has not cleared cost
+                # as the entry minute ends, flatten at that bid even at a loss.
+                flatten_loss=not (preview and preview.get('qualifies')) and minute_age is not None and minute_age>=58
+                if not (preview and preview.get('qualifies')) and not flatten_loss:
                     continue
                 try:
                     exchange_age=now-float(book['timestamp'])/1000.0
                 except (TypeError, ValueError, KeyError):
                     exchange_age=None
                 try:
-                    exited=journal.realize_if_bid_above_cost(market,book,now,in_hand=True)
+                    exited=journal.realize_if_bid_above_cost(market,book,now,in_hand=True,allow_loss=flatten_loss)
                     if exited:
-                        unused=now-state['first_qualifying']
+                        unused=0 if state['first_qualifying'] is None else now-state['first_qualifying']
                         if age>float(config['max_book_age_seconds']):
                             unused=max(unused, age)
                         exited['quote_source']='prefetch'
@@ -710,7 +721,9 @@ def main():
                         exited['unused_qualifying_seconds']=round(unused, 3)
                         exited['scans_with_book']=state['with_book']
                         exited['scans_without_book']=state['without_book']
-                        if unused>0.25:
+                        if exited.get('reason')=='same_minute_flatten_at_loss':
+                            exited['gap_reason']='same_minute_flatten_at_loss'
+                        elif unused>0.25:
                             exited['gap_reason']='qualifying_bid_sat_unused'
                         else:
                             exited['gap_reason']='waiting_for_bid_above_cost'
