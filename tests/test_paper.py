@@ -372,6 +372,41 @@ class PaperCTests(unittest.TestCase):
         self.assertEqual(late["our_price"], "0.51")
         self.assertEqual(journal.cash + journal.holdings()[TOKEN_UP]["cost"], Decimal("39"))
 
+    def test_buy_priced_over_0_60_is_skipped_and_a_worse_price_is_not_copied(self):
+        journal = self.journal(copy_buys_at_or_better=True, sell_same_minute_if_bid_above_cost=True,
+                               starting_cash_usd="37.40", max_open_cost_usd="37.39", goal_usd="75")
+        live = market(feeSchedule={"exponent": 1, "rate": "0.07", "takerOnly": True, "rebateRate": "0.2"},
+                      feeType="crypto_fees_v2", takerBaseFee=1000)
+        skipped = journal.process(
+            "buy-rich", row(price="0.61", size="10"), live,
+            book(asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.39", "size": "100"}]), NOW,
+        )
+        self.assertEqual(skipped["status"], "SKIP")
+        self.assertEqual(skipped["reason"], "buy_priced_over_0.60")
+        self.assertEqual(skipped["his_price"], "0.61")
+        self.assertTrue(skipped["rule_skipped"])
+        self.assertEqual(journal.cash, Decimal("37.40"))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+        worse = journal.process(
+            "buy-worse", row(price="0.60", size="10", transaction_hash="0xworse"), live,
+            book(asks=[{"price": "0.61", "size": "100"}], bids=[{"price": "0.59", "size": "100"}]), NOW,
+        )
+        self.assertEqual(worse["status"], "SKIP")
+        self.assertEqual(worse["reason"], "latency_worse_than_leader_price")
+        self.assertEqual(journal.cash, Decimal("37.40"))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+        copied = journal.process(
+            "buy-cap", row(price="0.60", size="10", transaction_hash="0xcap"), live,
+            book(asks=[{"price": "0.60", "size": "100"}], bids=[{"price": "0.59", "size": "100"}]), NOW,
+        )
+        self.assertEqual(copied["status"], "PAPER_BUY")
+        self.assertEqual(copied["fee_rate"], "0.07")
+        self.assertEqual(Decimal(copied["fee"]), Decimal("0.16800"))
+        self.assertEqual(Decimal(copied["shares"]), Decimal("9.72"))
+        self.assertLessEqual(Decimal(copied["simulated_vwap"]), Decimal(copied["his_price"]))
+        self.assertEqual(journal.cash, Decimal("31.40"))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["cost"], Decimal("6.00"))
+
     def test_better_full_size_price_copies_his_exact_share_count(self):
         journal = self.journal(copy_buys_at_or_better=True)
         asks = [{"price": "0.07", "size": "270"}, {"price": "0.09", "size": "100"}]
