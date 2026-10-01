@@ -1,15 +1,18 @@
 """Public Polymarket trade watcher and paper BUY planner. Never submits orders."""
 import argparse
+import copy
 import hashlib
+import http.client
 import json
 import re
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode, urlsplit
 
 
 def decimal(value):
@@ -50,11 +53,222 @@ def validate(config):
     return config
 
 
+USER_AGENT = "btc-copy-paper-prototype/0.1"
+# Gamma documents identify the market. They are not the executable book.
+MARKET_CACHE_SECONDS = 10
+POOL_SIZE = 4
+
+
+class RateLimited(Exception):
+    """A host returned 429. retry_after is how long callers must wait before another request."""
+
+    def __init__(self, host, retry_after):
+        self.host = host
+        self.retry_after = float(retry_after)
+        super().__init__(
+            f"HTTP Error 429: Too Many Requests; backing off {self.retry_after:.3f}s"
+        )
+
+
+class PublicClient:
+    """One shared keep-alive pool for public GETs. Never signs or submits an order.
+
+    A 429 parks that host until the backoff ends. Calls during the pause raise
+    RateLimited and do not open a socket. Gamma market documents are cached.
+    Order books are not, so a copy still sees the live price.
+    """
+
+    def __init__(self, connector=None, clock=None, cache_seconds=MARKET_CACHE_SECONDS,
+                 pool_size=POOL_SIZE):
+        self._connector = connector
+        self._clock = clock or time.monotonic
+        self._cache_seconds = cache_seconds
+        self._pool_size = pool_size
+        self._lock = threading.Lock()
+        self._idle = {}
+        self._slots = {}
+        self._backoff_until = {}
+        self._backoff_step = {}
+        self._cache = {}
+        self._inflight = {}
+
+    def get(self, base, params=None):
+        url = base + ("?" + urlencode(params) if params else "")
+        parts = urlsplit(url)
+        host = parts.hostname
+        if not host:
+            raise ValueError("missing_host")
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        cached = self._read_cache(url)
+        if cached is not None:
+            return cached
+        self._raise_if_blocked(host)
+        with self._lock:
+            flight = self._inflight.get(url)
+            leader = flight is None
+            if leader:
+                flight = _Flight()
+                self._inflight[url] = flight
+        if not leader:
+            if not flight.event.wait(15):
+                raise TimeoutError("public request timed out")
+            if flight.error is not None:
+                raise flight.error
+            return copy.deepcopy(flight.value)
+        try:
+            cached = self._read_cache(url)
+            if cached is not None:
+                flight.value = cached
+                return copy.deepcopy(cached)
+            self._raise_if_blocked(host)
+            payload = self._fetch(host, path)
+            if _cacheable(url):
+                self._write_cache(url, payload)
+            flight.value = payload
+            return copy.deepcopy(payload)
+        except Exception as exc:
+            flight.error = exc
+            raise
+        finally:
+            flight.event.set()
+            with self._lock:
+                if self._inflight.get(url) is flight:
+                    del self._inflight[url]
+
+    def _fetch(self, host, path):
+        sem = self._slot(host)
+        sem.acquire()
+        conn = None
+        broken = False
+        try:
+            conn = self._acquire(host)
+            try:
+                conn.request(
+                    "GET", path,
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Accept": "application/json",
+                        "Connection": "keep-alive",
+                    },
+                )
+                response = conn.getresponse()
+                body = response.read()
+            except Exception:
+                broken = True
+                raise
+            if response.status == 429:
+                delay = self._penalize(host, response)
+                raise RateLimited(host, delay)
+            if response.status != 200:
+                raise HTTPError(f"https://{host}{path}", response.status, response.reason, None, None)
+            self._reset_penalty(host)
+            return json.loads(body.decode())
+        finally:
+            if conn is not None:
+                self._release(host, conn, broken)
+            sem.release()
+
+    def _acquire(self, host):
+        with self._lock:
+            idle = self._idle.get(host)
+            if idle:
+                return idle.pop()
+        if self._connector is not None:
+            return self._connector(host)
+        return http.client.HTTPSConnection(host, timeout=10)
+
+    def _release(self, host, conn, broken):
+        if broken:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return
+        with self._lock:
+            idle = self._idle.setdefault(host, [])
+            if len(idle) < self._pool_size:
+                idle.append(conn)
+                return
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    def _slot(self, host):
+        with self._lock:
+            sem = self._slots.get(host)
+            if sem is None:
+                sem = threading.BoundedSemaphore(self._pool_size)
+                self._slots[host] = sem
+            return sem
+
+    def _raise_if_blocked(self, host):
+        remaining = self._remaining(host)
+        if remaining > 0:
+            raise RateLimited(host, remaining)
+
+    def _remaining(self, host):
+        with self._lock:
+            until = self._backoff_until.get(host, 0)
+        return max(0.0, until - self._clock())
+
+    def _penalize(self, host, response):
+        header = response.getheader("Retry-After") if response is not None else None
+        parsed = None
+        if header is not None:
+            try:
+                parsed = float(header)
+            except (TypeError, ValueError):
+                parsed = None
+        with self._lock:
+            step = self._backoff_step.get(host, 1.0)
+            delay = parsed if parsed is not None and parsed > 0 else step
+            delay = min(60.0, max(1.0, delay))
+            self._backoff_until[host] = self._clock() + delay
+            self._backoff_step[host] = min(60.0, max(delay * 2, step * 2, 1.0))
+            return delay
+
+    def _reset_penalty(self, host):
+        with self._lock:
+            self._backoff_step[host] = 1.0
+            self._backoff_until.pop(host, None)
+
+    def _read_cache(self, url):
+        if not _cacheable(url):
+            return None
+        with self._lock:
+            hit = self._cache.get(url)
+            if hit is None or hit[0] <= self._clock():
+                self._cache.pop(url, None)
+                return None
+            payload = hit[1]
+        return copy.deepcopy(payload)
+
+    def _write_cache(self, url, payload):
+        with self._lock:
+            self._cache[url] = (self._clock() + self._cache_seconds, copy.deepcopy(payload))
+
+
+class _Flight:
+    def __init__(self):
+        self.event = threading.Event()
+        self.value = None
+        self.error = None
+
+
+def _cacheable(url):
+    parts = urlsplit(url)
+    return parts.hostname == "gamma-api.polymarket.com" and "/markets/" in (parts.path or "")
+
+
+_client = PublicClient()
+
+
 def get_json(base, params=None):
-    url = base + ("?" + urlencode(params) if params else "")
-    request = Request(url, headers={"User-Agent": "btc-copy-paper-prototype/0.1"})
-    with urlopen(request, timeout=10) as response:
-        return json.load(response)
+    """GET public JSON through the shared client. No order is submitted."""
+    return _client.get(base, params)
 
 
 def activity(wallet, start, end, fetch=get_json):
@@ -294,17 +508,26 @@ def main():
     journal.bind(config)
     failures = 0
     while True:
+        delay = config["poll_seconds"]
         try:
             poll(config, journal)
             failures = 0
+        except RateLimited as exc:
+            if args.once:
+                raise
+            failures += 1
+            delay = exc.retry_after
+            print(json.dumps({"status": "ERROR", "message": str(exc),
+                              "retry_after_seconds": exc.retry_after}), flush=True)
         except Exception as exc:
             if args.once:
                 raise
             failures += 1
+            delay = min(60, config["poll_seconds"] * (2 ** min(failures, 5)))
             print(json.dumps({"status": "ERROR", "message": str(exc)}), flush=True)
         if args.once:
             break
-        time.sleep(min(60, config["poll_seconds"] * (2 ** min(failures, 5))))
+        time.sleep(delay)
 
 
 if __name__ == "__main__":

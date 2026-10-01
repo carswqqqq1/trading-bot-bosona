@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -231,6 +232,128 @@ class WatcherTests(unittest.TestCase):
             self.assertGreater(spent, 0)
             self.assertLessEqual(spent, Decimal("50"))
             self.assertEqual(restarted.db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 2)
+
+
+class ScriptedResponse:
+    def __init__(self, status, payload, headers=None, reason="OK"):
+        self.status = status
+        self.reason = reason
+        self._payload = payload
+        self._headers = {str(key).lower(): value for key, value in (headers or {}).items()}
+
+    def read(self):
+        if isinstance(self._payload, bytes):
+            return self._payload
+        return json.dumps(self._payload).encode()
+
+    def getheader(self, name, default=None):
+        return self._headers.get(str(name).lower(), default)
+
+
+class ScriptedConnection:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def request(self, method, path, headers=None):
+        self.calls.append((method, path))
+
+    def getresponse(self):
+        return self.responses.pop(0)
+
+    def close(self):
+        self.calls.append(("close", None))
+
+
+class PublicClientTests(unittest.TestCase):
+    def clock(self):
+        if not hasattr(self, "_now"):
+            self._now = 0.0
+        return self._now
+
+    def client(self, responses):
+        conn = ScriptedConnection(responses)
+        created = []
+
+        def connector(host):
+            created.append(host)
+            conn.host = host
+            return conn
+
+        client = bot.PublicClient(connector=connector, clock=self.clock, cache_seconds=10, pool_size=2)
+        return client, conn, created
+
+    def test_429_backoff_skips_the_next_poll_until_the_host_is_clear(self):
+        client, conn, created = self.client([
+            ScriptedResponse(429, {"error": "slow down"}, {"Retry-After": "5"}, "Too Many Requests"),
+            ScriptedResponse(200, {"data": []}),
+        ])
+        book = "https://clob.polymarket.com/book"
+        with self.assertRaises(bot.RateLimited) as caught:
+            client.get(book, {"token_id": "1"})
+        self.assertEqual(caught.exception.host, "clob.polymarket.com")
+        self.assertEqual(caught.exception.retry_after, 5)
+        self.assertEqual(len(conn.calls), 1)
+        with self.assertRaises(bot.RateLimited) as again:
+            client.get(book, {"token_id": "1"})
+        self.assertEqual(len(conn.calls), 1)
+        self.assertEqual(len(created), 1)
+        self.assertAlmostEqual(again.exception.retry_after, 5)
+        self._now = 5
+        self.assertEqual(client.get(book, {"token_id": "1"}), {"data": []})
+        self.assertEqual(len(conn.calls), 2)
+
+    def test_missing_retry_after_still_waits_at_least_one_second(self):
+        client, conn, _created = self.client([
+            ScriptedResponse(429, {}, reason="Too Many Requests"),
+            ScriptedResponse(429, {}, reason="Too Many Requests"),
+            ScriptedResponse(200, {"ok": True}),
+        ])
+        url = "https://data-api.polymarket.com/v2/activity"
+        with self.assertRaises(bot.RateLimited) as first:
+            client.get(url)
+        self.assertGreaterEqual(first.exception.retry_after, 1)
+        with self.assertRaises(bot.RateLimited):
+            client.get(url)
+        self.assertEqual(len(conn.calls), 1)
+        self._now = first.exception.retry_after
+        with self.assertRaises(bot.RateLimited) as second:
+            client.get(url)
+        self.assertGreaterEqual(second.exception.retry_after, first.exception.retry_after * 2)
+        self.assertEqual(len(conn.calls), 2)
+
+    def test_gamma_market_is_cached_and_a_book_is_not(self):
+        market = {"slug": "btc-updown-5m-1", "active": True}
+        client, conn, created = self.client([
+            ScriptedResponse(200, market),
+            ScriptedResponse(200, {"asks": []}),
+            ScriptedResponse(200, {"asks": [{"price": "0.4"}]}),
+        ])
+        gamma = "https://gamma-api.polymarket.com/markets/slug/btc-updown-5m-1"
+        first = client.get(gamma)
+        first["active"] = False
+        second = client.get(gamma)
+        self.assertTrue(second["active"])
+        self.assertEqual(len(conn.calls), 1)
+        self.assertEqual(len(created), 1)
+        book = "https://clob.polymarket.com/book"
+        self.assertEqual(client.get(book, {"token_id": "9"}), {"asks": []})
+        self.assertEqual(client.get(book, {"token_id": "9"}), {"asks": [{"price": "0.4"}]})
+        self.assertEqual(len(conn.calls), 3)
+        self.assertEqual(len(created), 2)
+
+    def test_one_host_backoff_does_not_block_another(self):
+        client, conn, _created = self.client([
+            ScriptedResponse(429, {}, {"Retry-After": "8"}, "Too Many Requests"),
+            ScriptedResponse(200, {"slug": "btc"}),
+        ])
+        with self.assertRaises(bot.RateLimited):
+            client.get("https://clob.polymarket.com/book", {"token_id": "1"})
+        self.assertEqual(
+            client.get("https://gamma-api.polymarket.com/markets/slug/btc-updown-5m-1"),
+            {"slug": "btc"},
+        )
+        self.assertEqual(len(conn.calls), 2)
 
 
 if __name__ == "__main__":
