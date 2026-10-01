@@ -24,10 +24,10 @@ On a new buy the fee is taken in shares, so the held count is his size minus
 fee divided by price. On a sell the fee comes out of the USDC proceeds. A
 resolution is not a fill and has no fee. Makers pay nothing. A schedule that
 names another rate does not replace 0.07.
-sell_any_minute_if_bid_above_cost sells in any minute. A bid above paper cost
-marks the gain. A bid that is no longer above paper cost sells the position
-too, so it does not stay unmarked. Closed profit is not spent on a new buy
-unless five shares fill at his price or better. The opening minute is not
+sell_any_minute_if_bid_above_cost sells in any minute when the bid is above
+paper cost. A bid at or below cost stays open so the spread is not locked in.
+Closed profit is not spent on a new buy unless five shares fill at his price
+or at most one tick worse. The opening minute is not
 special. Decision latency is his fill timestamp to that copy or skip.
 seconds_from_start is measured from this restart until marked cash hits the
 goal. A resolution does not count as that goal. The paper48 path is unchanged.
@@ -479,7 +479,10 @@ class PaperJournal:
                                 raise ValueError('latency_worse_than_leader_price')
                             raise ValueError('his_size_exceeds_cash' if spends_profit else 'his_size_not_on_the_book')
                         decision['simulated_vwap'] = str(clip['vwap'])
-                        if clip['vwap'] > source_price:
+                        # His full size has usually walked. Five shares may pay
+                        # one tick more so the book still gets a copy. Anything
+                        # wider stays a skip.
+                        if clip['vwap'] > source_price + tick:
                             raise ValueError('latency_worse_than_leader_price')
                         if clip['gross'] > self.cash:
                             raise ValueError('his_size_exceeds_cash')
@@ -627,12 +630,11 @@ class PaperJournal:
             return None
 
     def realize_any_minute_if_bid_above_cost(self, market, book, now):
-        """Sell a paper position in any minute.
+        """Sell a paper position in any minute when the bid is above paper cost.
 
-        A bid above paper cost marks the gain. A bid that is no longer above
-        paper cost sells the position as well, so closed profit is not left
-        in an unmarked book. This does not wait for a sell he prints. The
-        book must hold the full position. Missing size is not invented.
+        A bid that is no longer above paper cost does not sell. Selling there
+        locks in the spread and the taker fee. The book must hold the full
+        position. Missing size is not invented.
         """
         if not (self.config.get('strategy')=='paper_c' and self.config.get('sell_any_minute_if_bid_above_cost')):
             return None
@@ -660,24 +662,15 @@ class PaperJournal:
                     fill = quote(book,'SELL',quantity,rate,cost_per)
                 except ValueError:
                     fill = None
-                if fill is not None and fill['vwap'] > cost_per:
-                    net = fill['gross']-fill['fee']
-                    if net <= removed:
-                        return None
-                    reason = 'any_minute_bid_above_paper_cost'
-                    latency_note = ('The bid was above paper cost. This sell does not wait for the '
-                                    'opening minute or for a sell he prints. Latency is his opening fill to this sell.')
-                else:
-                    try:
-                        fill = quote(book,'SELL',quantity,rate)
-                    except ValueError:
-                        return None
-                    if fill['vwap'] > cost_per:
-                        return None
-                    net = fill['gross']-fill['fee']
-                    reason = 'any_minute_bid_no_longer_above_paper_cost'
-                    latency_note = ('The bid is no longer above paper cost, so the open position is sold '
-                                    'in this minute instead of staying unmarked. Latency is his opening fill to this sell.')
+                if fill is None or fill['vwap'] <= cost_per:
+                    return None
+                net = fill['gross']-fill['fee']
+                if net <= removed:
+                    return None
+                reason = 'any_minute_bid_above_paper_cost'
+                latency_note = ('The bid was above paper cost. This sell does not wait for the '
+                                'opening minute or for a sell he prints. A bid at or below cost '
+                                'stays open so the spread is not locked in. Latency is his opening fill to this sell.')
                 cash = self.cash+net
                 position['shares'] = ZERO
                 position['cost'] = ZERO
@@ -1134,7 +1127,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         rule_name = 'sell_any_minute_if_bid_above_cost' if config.get('sell_any_minute_if_bid_above_cost') else None
         buy_filter = ('copy his exact share count, same side and market, only when the full size fills at his price or better and the debit does not spend closed profit; '
                       'closed profit may buy five shares only when those five fill at his price or better; '
-                      'a full size whose ask has walked uses that same five-share clip when it is still at his price; '
+                      'a full size whose ask has walked may buy five shares at his price or at most one tick worse; '
                       'skip when that size is not on the book; do not copy at a worse price; '
                       'a new buy pays the taker fee in shares and a new sell pays it from USDC proceeds; '
                       'copy a sell he prints only when it closes an existing paper position above paper cost')

@@ -368,8 +368,8 @@ class PaperCTests(unittest.TestCase):
             "buy-late", row(transaction_hash="0xlate", price="0.50", size="10"), market(),
             book(asks=[{"price": "0.51", "size": "100"}], bids=[{"price": "0.49", "size": "100"}]), NOW,
         )
-        self.assertEqual(late["status"], "SKIP")
-        self.assertEqual(late["reason"], "latency_worse_than_leader_price")
+        self.assertEqual(late["status"], "PAPER_BUY")
+        self.assertEqual(late["copy_size"], "five")
         self.assertEqual(late["our_price"], "0.51")
         self.assertEqual(journal.cash + journal.holdings()[TOKEN_UP]["cost"], Decimal("39"))
 
@@ -456,10 +456,11 @@ class PaperCTests(unittest.TestCase):
         skipped = journal.process(
             "buy-late-off", row(price="0.40", size="10", transaction_hash="0xother"),
             market(feesEnabled=False),
-            book(asks=[{"price": "0.41", "size": "100"}], bids=[{"price": "0.39", "size": "100"}]),
+            book(asks=[{"price": "0.42", "size": "100"}], bids=[{"price": "0.39", "size": "100"}]),
             NOW,
         )
         self.assertEqual(skipped["status"], "SKIP")
+        self.assertEqual(skipped["reason"], "latency_worse_than_leader_price")
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], stored["shares"])
         self.assertEqual(journal.holdings()[TOKEN_UP]["cost"], stored["cost"])
 
@@ -682,12 +683,12 @@ class PaperCTests(unittest.TestCase):
         walked = self.journal(copy_buys_at_or_better=True)
         walked.db.execute("UPDATE meta SET value=? WHERE key='cash'", ("40",))
         walked.db.commit()
-        skipped = walked.process(
+        wider = walked.process(
             "buy-walked", row(price="0.50", size="80", transaction_hash="0xwalk"), market(),
-            book(asks=[{"price": "0.51", "size": "100"}], bids=[{"price": "0.49", "size": "100"}]), NOW,
+            book(asks=[{"price": "0.52", "size": "100"}], bids=[{"price": "0.49", "size": "100"}]), NOW,
         )
-        self.assertEqual(skipped["status"], "SKIP")
-        self.assertEqual(skipped["reason"], "latency_worse_than_leader_price")
+        self.assertEqual(wider["status"], "SKIP")
+        self.assertEqual(wider["reason"], "latency_worse_than_leader_price")
         self.assertEqual(walked.cash, Decimal("40"))
 
     def test_five_shares_copy_when_only_the_full_size_has_walked(self):
@@ -702,21 +703,30 @@ class PaperCTests(unittest.TestCase):
         self.assertEqual(Decimal(copied["simulated_vwap"]), Decimal("0.50"))
         self.assertEqual(journal.holdings()[TOKEN_UP]["cost"], Decimal("2.50"))
 
-    def test_a_bid_no_longer_above_cost_sells_in_any_minute(self):
+    def test_one_tick_worse_copies_five_shares_and_two_ticks_do_not(self):
+        journal = self.journal(copy_buys_at_or_better=True)
+        one = journal.process(
+            "buy-one-tick", row(price="0.50", size="40"), market(),
+            book(asks=[{"price": "0.51", "size": "100"}], bids=[{"price": "0.49", "size": "100"}]), NOW,
+        )
+        self.assertEqual(one["status"], "PAPER_BUY")
+        self.assertEqual(one["copy_size"], "five")
+        self.assertEqual(Decimal(one["simulated_vwap"]), Decimal("0.51"))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["cost"], Decimal("2.55"))
+        wider = self.journal(copy_buys_at_or_better=True).process(
+            "buy-two-ticks", row(price="0.50", size="40", transaction_hash="0xwide"), market(),
+            book(asks=[{"price": "0.52", "size": "100"}], bids=[{"price": "0.49", "size": "100"}]), NOW,
+        )
+        self.assertEqual(wider["status"], "SKIP")
+        self.assertEqual(wider["reason"], "latency_worse_than_leader_price")
+
+    def test_a_bid_at_or_below_cost_stays_open(self):
         journal = self.journal(copy_buys_at_or_better=True, sell_any_minute_if_bid_above_cost=True)
         opened = book(asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.60", "size": "100"}])
         bought = journal.process("buy-open", row(price="0.50", size="10", timestamp=NOW - 1), market(), opened, NOW)
-        self.assertEqual(bought["status"], "PAPER_BUY")
         cheap = book(timestamp=(NOW + 60) * 1000, asks=[{"price": "0.40", "size": "100"}], bids=[{"price": "0.41", "size": "100"}])
-        sold = journal.realize_any_minute_if_bid_above_cost(market(), cheap, NOW + 60)
-        self.assertEqual(sold["status"], "PAPER_SELL")
-        self.assertEqual(sold["reason"], "any_minute_bid_no_longer_above_paper_cost")
-        self.assertLessEqual(Decimal(sold["our_price"]), Decimal(sold["cost_per_share_usd"]))
-        self.assertLess(Decimal(sold["realized_pnl_usd"]), 0)
-        self.assertGreater(Decimal(sold["fee"]), 0)
-        self.assertEqual(sold["fill_latency_seconds"], sold["decision_latency_seconds"])
-        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
-        self.assertFalse(journal.cash_goal_reached())
+        self.assertIsNone(journal.realize_any_minute_if_bid_above_cost(market(), cheap, NOW + 60))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal(bought["shares"]))
 
     def test_fill_clock_is_kept_from_the_first_goal_run(self):
         journal = self.journal(copy_buys_at_or_better=True)
