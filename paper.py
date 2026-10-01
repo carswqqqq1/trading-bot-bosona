@@ -667,7 +667,10 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     book_was_steadily_losing=rule_reset is not None,
                     goal_usd='78',goal_reached=goal_reached,poll_seconds=config['poll_seconds'],
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
-                    filter='Do not open new buys. Copy a sell only when it closes an existing paper position above paper cost. Skip when there is no matching paper position.',
+                    filter=('Copy his buy, same side and market, only when the book fills at his price or better and the open cost stays inside the cash. '
+                            'Copy a sell only when it closes an existing paper position above paper cost.'
+                            if config.get('copy_buys_at_or_better') else
+                            'Do not open new buys. Copy a sell only when it closes an existing paper position above paper cost. Skip when there is no matching paper position.'),
                     windows=[dict(window=window['window'],trades=window['trades'],note=window['note'],
                                   his_trades=window['decisions'],cash_usd=window['cash_usd'],
                                   realized_pnl_usd=window['realized_pnl_usd'],
