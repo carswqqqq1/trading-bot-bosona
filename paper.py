@@ -38,7 +38,8 @@ from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_CEILING
 from pathlib import Path
 from urllib.parse import quote as urlquote
 
-from bot import activity, array, decimal as D, get_json, market_timeframe, row_keys, source_skip, validate
+from bot import (activity, array, decimal as D, get_json, market_timeframe, row_keys,
+                   source_skip, validate, RateLimited)
 
 ZERO = Decimal(0)
 STEP = Decimal('0.01')
@@ -833,6 +834,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                         market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
                         book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
                         books.append((market_future.result(), book_future.result()))
+                    except RateLimited:
+                        raise
                     except Exception as exc:
                         emit(dict(status='ERROR',message=str(exc),token_id=token))
             for market_row, book_row in books:
@@ -888,16 +891,43 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     next_request = time.monotonic()+config['poll_seconds']
                     # A same-minute position sells on the first book whose bid clears
                     # cost. The activity request must not hold that check.
-                    if minute_position_open():
-                        sell_same_minute(window_index)
+                    # A 429 holds the whole tick so the next poll does not hit that host again.
+                    rate_hold = 0
+                    try:
+                        if minute_position_open():
+                            sell_same_minute(window_index)
+                    except RateLimited as exc:
+                        rate_hold = exc.retry_after
+                        emit(dict(status='ERROR',message=str(exc),retry_after_seconds=exc.retry_after))
+                        next_request=max(next_request,time.monotonic()+exc.retry_after)
+                    if rate_hold:
+                        remaining=args.duration-(time.monotonic()-window_started)
+                        if remaining > 0:
+                            time.sleep(min(rate_hold, remaining))
+                        continue
                     try:
                         activity_future=pool.submit(activity,config['leader_wallet'],max(source_start,int(time.time())-120),int(time.time()))
                         while not activity_future.done() and minute_position_open() and time.monotonic()-window_started < args.duration:
                             watched=time.monotonic()
-                            sell_same_minute(window_index)
+                            try:
+                                sell_same_minute(window_index)
+                            except RateLimited as exc:
+                                rate_hold = exc.retry_after
+                                emit(dict(status='ERROR',message=str(exc),retry_after_seconds=exc.retry_after))
+                                next_request=max(next_request,time.monotonic()+exc.retry_after)
+                                break
                             pause=config['poll_seconds']-(time.monotonic()-watched)
                             if pause > 0 and not activity_future.done():
                                 time.sleep(pause)
+                        if rate_hold:
+                            try:
+                                activity_future.result()
+                            except Exception:
+                                pass
+                            remaining=args.duration-(time.monotonic()-window_started)
+                            if remaining > 0:
+                                time.sleep(min(rate_hold, remaining))
+                            continue
                         rows=activity_future.result()
                         for key,row in row_keys(rows):
                             if journal.contains(key):
@@ -949,14 +979,34 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                         decision=journal.process(key,row,{},{},appeared,skip_reason=reason)
                                         emit(decision)
                                         remember(window_index, decision)
+                            except RateLimited as exc:
+                                rate_hold = exc.retry_after
+                                emit(dict(status='ERROR',message=str(exc),event_id=key,
+                                          retry_after_seconds=exc.retry_after))
+                                next_request=max(next_request,time.monotonic()+exc.retry_after)
+                                break
                             except Exception as exc:
                                 emit(dict(status='ERROR',message=str(exc),event_id=key))
+                    except RateLimited as exc:
+                        rate_hold = exc.retry_after
+                        emit(dict(status='ERROR',message=str(exc),retry_after_seconds=exc.retry_after))
+                        next_request=max(next_request,time.monotonic()+exc.retry_after)
                     except Exception as exc:
                         emit(dict(status='ERROR',message=str(exc)))
                         next_request=max(next_request,time.monotonic()+0.5)
-                    sell_same_minute(window_index)
+                    if rate_hold:
+                        remaining=args.duration-(time.monotonic()-window_started)
+                        if remaining > 0:
+                            time.sleep(min(rate_hold, remaining))
+                        continue
+                    try:
+                        sell_same_minute(window_index)
+                    except RateLimited as exc:
+                        rate_hold = exc.retry_after
+                        emit(dict(status='ERROR',message=str(exc),retry_after_seconds=exc.retry_after))
+                        next_request=max(next_request,time.monotonic()+exc.retry_after)
                     remaining=args.duration-(time.monotonic()-window_started)
-                    if remaining > 0 and not minute_position_open():
+                    if remaining > 0 and (rate_hold or not minute_position_open()):
                         time.sleep(min(max(0,next_request-time.monotonic()),remaining))
                 for close in journal.realize_public_resolutions(get_json, time.time()):
                     emit(close)
@@ -1109,6 +1159,7 @@ def main():
         try:
             while time.monotonic()-started < args.duration:
                 next_request = time.monotonic()+config['poll_seconds']
+                limited = False
                 try:
                     rows=activity(config['leader_wallet'],max(source_start,int(time.time())-120),int(time.time()))
                     for key,row in row_keys(rows):
@@ -1139,20 +1190,29 @@ def main():
                             market,book=market_future.result(),book_future.result()
                         emit(journal.process(key,row,market,book,time.time(),
                                              skip_reason='resume_backlog_not_copied' if backlog else None))
+                except RateLimited as exc:
+                    limited = True
+                    emit(dict(status='ERROR',message=str(exc),retry_after_seconds=exc.retry_after))
+                    next_request=max(next_request,time.monotonic()+exc.retry_after)
                 except Exception as exc:
                     emit(dict(status='ERROR',message=str(exc)))
                     next_request=max(next_request,time.monotonic()+2)
-                for token,position in list(journal.holdings().items()):
-                    if position['shares'] <= 0:
-                        continue
-                    try:
-                        market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
-                        book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
-                        exited=journal.realize_if_bid_above_cost(market_future.result(),book_future.result(),time.time())
-                        if exited:
-                            emit(exited)
-                    except Exception as exc:
-                        emit(dict(status='ERROR',message=str(exc)))
+                if not limited:
+                    for token,position in list(journal.holdings().items()):
+                        if position['shares'] <= 0:
+                            continue
+                        try:
+                            market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
+                            book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
+                            exited=journal.realize_if_bid_above_cost(market_future.result(),book_future.result(),time.time())
+                            if exited:
+                                emit(exited)
+                        except RateLimited as exc:
+                            emit(dict(status='ERROR',message=str(exc),retry_after_seconds=exc.retry_after))
+                            next_request=max(next_request,time.monotonic()+exc.retry_after)
+                            break
+                        except Exception as exc:
+                            emit(dict(status='ERROR',message=str(exc)))
                 remaining=args.duration-(time.monotonic()-started)
                 if remaining > 0:
                     time.sleep(min(max(0,next_request-time.monotonic()),remaining))
