@@ -89,37 +89,31 @@ def quote(book, side, quantity, rate, limit=None):
 FIVE = Decimal('5')
 
 
-def buy_entry(book, source_price, rate, tick, minimum, budget, open_room, per_buy_room, worse_than_leader=ZERO):
-    """Size a BUY at the 5-share minimum, or raise a rule name.
+def buy_entry(book, source_price, source_shares, rate, tick, minimum, cash, worse_than_leader=ZERO):
+    """Copy his share count, or raise a rule name.
 
-    The fill must be at his price, better, or at most worse_than_leader above it.
-    A worse ask means latency already forced a worse price, so the buy is skipped.
-    Passing does not guarantee a profit. The copied market and side are his.
+    The market minimum is 5. A smaller leader size is skipped and not rounded up.
+    The whole size must fill at his price or better. If that debit is more than
+    the cash on hand, the buy is skipped and not scaled down.
     """
-    if budget <= 0:
-        if open_room <= 0 and per_buy_room > 0:
-            raise ValueError('open_risk_cap')
-        raise ValueError('five_shares_exceed_per_buy_budget')
+    if source_shares < max(minimum, FIVE):
+        raise ValueError('leader_size_below_market_minimum')
     ceiling = source_price + worse_than_leader
     asks = levels(book, 'BUY')
     if not asks:
-        raise ValueError('five_shares_not_at_or_better_than_leader_fill')
+        raise ValueError('leader_size_not_at_or_better_than_leader_fill')
     if asks[0][0] > ceiling:
         raise ValueError('latency_worse_than_leader_price')
-    required = max(minimum, FIVE)
-    required = (required / STEP).to_integral_value(rounding=ROUND_CEILING) * STEP
+    required = source_shares
     limit = (ceiling / tick).to_integral_value(rounding=ROUND_DOWN) * tick
     try:
         preview = quote(book, 'BUY', required, rate, limit)
     except ValueError:
-        raise ValueError('five_shares_not_at_or_better_than_leader_fill')
+        raise ValueError('leader_size_not_at_or_better_than_leader_fill')
     if preview['vwap'] > ceiling:
         raise ValueError('latency_worse_than_leader_price')
-    debit = preview['gross'] + preview['fee']
-    if debit > budget:
-        if open_room < per_buy_room and debit <= per_buy_room:
-            raise ValueError('open_risk_cap')
-        raise ValueError('five_shares_exceed_per_buy_budget')
+    if preview['gross'] + preview['fee'] > cash:
+        raise ValueError('leader_size_costs_more_than_cash')
     return required, limit
 
 
@@ -227,7 +221,7 @@ class PaperJournal:
                                          else max(ZERO,leader_before-source_shares))
             decision = dict(status='SKIP',event_id=key,paper=True,executed=False,side=row['side'],slug=row['slug'],
                             outcome=row['outcome'],source_transaction=row.get('transaction_hash'),
-                            source_timestamp_seconds=row['timestamp'],
+                            source_timestamp_seconds=row['timestamp'],his_shares=str(source_shares),
                             source_to_decision_seconds=round(now-int(row['timestamp']),3))
             try:
                 if skip_reason:
@@ -259,13 +253,8 @@ class PaperJournal:
                 except ValueError:
                     pass
                 if row['side']=='BUY':
-                    exposure = sum((p['cost'] for p in positions.values()),ZERO)
-                    per_buy_room = min(self.cash,D(self.config['max_buy_usd']),
-                                       D(self.config['max_outcome_cost_usd'])-position['cost'])
-                    open_room = D(self.config['max_open_cost_usd'])-exposure
-                    budget = min(per_buy_room, open_room)
                     quantity, limit = buy_entry(
-                        book, source_price, rate, tick, minimum, budget, open_room, per_buy_room,
+                        book, source_price, source_shares, rate, tick, minimum, self.cash,
                         D(self.config.get('max_worse_than_leader', 0)))
                 else:
                     if not leader_before or source_shares > leader_before:
@@ -277,8 +266,8 @@ class PaperJournal:
                 fill = quote(book,row['side'],quantity,rate,limit)
                 if row['side']=='BUY':
                     debit = fill['gross']+fill['fee']
-                    if debit > budget:
-                        raise ValueError('fee_inclusive_budget_exceeded')
+                    if debit > self.cash:
+                        raise ValueError('leader_size_costs_more_than_cash')
                     cash = self.cash-debit
                     position['shares'] += quantity
                     position['cost'] += debit
@@ -370,6 +359,9 @@ class PaperJournal:
                 if his_price is not None:
                     decision['his_price'] = str(his_price)
                     decision['cent_difference'] = str((fill['vwap']-D(his_price))*100)
+                his_size = position['row'].get('size')
+                if his_size is not None:
+                    decision['his_shares'] = str(D(his_size))
                 self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
                                 (token,json.dumps(position,default=str)))
                 self.db.execute('INSERT INTO seen VALUES (?,?)',
