@@ -1,6 +1,6 @@
 # Paper C
 
-Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
+Public wallet `0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed` (@bosona). Paper fills only. No live orders, private keys, or Brez. Figures are from the runs in [the first log](paperc-2026-10-01.jsonl), [the next log](paperc-next-2026-10-01.jsonl), [the book-moving log](paperc-next2-2026-10-01.jsonl), [the exact-size log](paperc-size-2026-10-01.jsonl), [the following log](paperc-size2-2026-10-01.jsonl), and [the result file](paperc-result-2026-10-01.json).
 
 ## One rule changed
 
@@ -150,3 +150,59 @@ One open book returned HTTP 404, so the sample did not mark a single unrealized 
 | Down `btc-updown-5m-1790820000` | 13.888884 | 3.72575542 | 7.39826620 |
 
 Cash plus those two quotes is $34.75850078. Adding a $1 payout on the unquoted 5 shares, the highest payout a resolved share can pay, is $39.75850078. That is still under $78. Goal $78 was not reached.
+
+## Better full-size price
+
+His buy of 275.48695 Up shares of `btc-updown-5m-1790819700` at 0.08 was skipped while the log showed our price at 0.07. That 0.07 was a 5-share quote. The copy path capped the book at his tick, so his full size failed the cap and the 5-share price was written down as our price. A better price on his full size is a copy. The size rule and the sell rule were not changed. A book that cannot hold his exact size still does not invent the rest.
+
+## Next sample
+
+The book was not reset and the rules were not changed again. The run resumed at cash $11.08387458 with the three open positions still on. [Log](paperc-size2-2026-10-01.jsonl).
+
+Two of those markets had a published resolution. The 404 from the earlier book quote was not used as a payout.
+
+| Close | Shares | Public price | Proceeds | Cost | Realized on the close | Cash after | Latency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Down `btc-updown-15m-1790819100` | 5 | 1 | 5 | 4.29463 | 0.70537 | 16.08387458 | none; this is not one of his fills |
+| Down `btc-updown-5m-1790820000` | 13.888884 | 0 | 0 | 3.72575542 | -3.72575542 | 16.08387458 | none; this is not one of his fills |
+
+Gamma `outcomePrices` were `["0", "1"]` for `["Up", "Down"]` on the 15-minute market, and `["1", "0"]` for `["Up", "Down"]` on the 5-minute market. Each close left unrealized P/L and the $78 check unset on that line because another position was still open. The mark taken immediately after both closes, with the hourly position still open, was unrealized P/L -$8.46365, equity $24.41950458. Equity did not reach $78.
+
+Three 120-second windows then copied ten buys and no sells. Window 3 had no trade. Buys at a better full-size price were copied.
+
+| Action | His size | Copied shares | Latency (seconds) | His price | Our price | Cent gap |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SKIP, full size worse than his price | 118.87 | 0 | 2.429 | 0.55 | 0.6 | 5.00 |
+| SKIP, below 5 shares | 1.315787 | 0 | 1.401 | 0.2400000912 |  |  |
+| SKIP, below 5 shares | 2.631579 | 0 | 1.623 | 0.2400000152 |  |  |
+| SKIP, below 5 shares | 1.315787 | 0 | 1.816 | 0.2400000912 |  |  |
+| PAPER_BUY | 5.27 | 5.27 | 1.47 | 0.8 | 0.57 | -23.00 |
+| SKIP, full size worse than his price | 65.21739 | 0 | 1.685 | 0.3100000015 | 0.4545029998900599978011999560 | 14.45029983900599978011999560 |
+| SKIP, below 5 shares | 1.449274 | 0 | 1.414 | 0.3100000414 |  |  |
+| SKIP, full size worse than his price | 249 | 0 | 1.447 | 0.5524385542 | 0.5644160642570281124497991968 | 1.197751005702811244979919680 |
+| PAPER_BUY | 5.55555 | 5.55555 | 6.014 | 0.1 | 0.02 | -8.00 |
+| PAPER_BUY | 8.92 | 8.92 | 3.204 | 0.08 | 0.02 | -6.00 |
+| PAPER_BUY | 5 | 5 | 3.433 | 0.08 | 0.02 | -6.00 |
+| PAPER_BUY | 5 | 5 | 3.635 | 0.08 | 0.02 | -6.00 |
+| PAPER_BUY | 5 | 5 | 3.869 | 0.08 | 0.02 | -6.00 |
+| PAPER_BUY | 5 | 5 | 4.067 | 0.08 | 0.02 | -6.00 |
+| PAPER_BUY | 52.33 | 52.33 | 4.29 | 0.06 | 0.01 | -5.00 |
+| PAPER_BUY | 5 | 5 | 4.481 | 0.08 | 0.01 | -7.00 |
+| PAPER_BUY | 5.319133 | 5.319133 | 4.677 | 0.0600000038 | 0.01 | -5.0000003800 |
+
+End of window 1, before those buys, the only open position was still the hourly Down. Unrealized P/L was -$9.14183 and equity was $23.74132458. Equity did not reach $78.
+
+| | USD |
+| --- | ---: |
+| Ending cash | 11.58283225 |
+| Realized P/L | -6.11684542 |
+| Unrealized P/L | not quoted |
+| Equity | not quoted |
+| Equity reached $78 | no quoted equity reached it |
+
+The new 5-minute book returned HTTP 404, so the sample end did not mark one unrealized P/L or equity, and no payout was invented for that book.
+
+| Open position | Shares | Cost | Liquidation quote |
+| --- | ---: | ---: | ---: |
+| Down `bitcoin-up-or-down-september-30-2026-10pm-et` | 35.19 | 16.79928 | 10.72479 |
+| Up `btc-updown-5m-1790820600` | 102.394683 | 4.50104233 | not quoted (HTTP 404) |
