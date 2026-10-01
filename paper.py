@@ -365,6 +365,19 @@ class PaperJournal:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO meta VALUES ('copy_shares','exact')")
 
+    def flatten_required(self):
+        row = self.db.execute("SELECT value FROM meta WHERE key='flatten_open_book'").fetchone()
+        return bool(row and row[0]=='1')
+
+    def arm_flatten(self):
+        """Sell the current open shares into the bid. Cash is not reset."""
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES ('flatten_open_book','1')")
+
+    def mark_book_flat(self):
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES ('flatten_open_book','0')")
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES ('book_flattened','1')")
+
     def baseline(self, rows, observer_start):
         if self.db.execute("SELECT 1 FROM meta WHERE key='observer_start'").fetchone():
             return
@@ -416,6 +429,8 @@ class PaperJournal:
                 # His price is already on the activity row. Skip this before the book.
                 exact_copy = (self.config.get('strategy')=='paper_c' and row['side']=='BUY'
                               and self.config.get('copy_buys_at_or_better'))
+                if exact_copy and self.flatten_required():
+                    raise ValueError('wait_for_flat_book')
                 if exact_copy and priced is not None and priced > BUY_PRICE_CAP:
                     raise ValueError('buy_priced_over_0.60')
                 # His print is the source. A smaller size is not invented.
@@ -587,7 +602,8 @@ class PaperJournal:
                 decision['unrealized_pnl_usd'] = '0'
             if decision['status']=='SKIP' and 'realized_pnl_usd' not in decision:
                 decision['realized_pnl_usd'] = '0'
-            position['row'] = row
+            if decision['status'] != 'SKIP' or position['shares'] == 0:
+                position['row'] = row
             payload = json.dumps(position,default=str)
             self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',(token,payload))
             self.db.execute('INSERT INTO seen VALUES (?,?)',(key,json.dumps(decision)))
@@ -649,11 +665,11 @@ class PaperJournal:
             return None
 
     def realize_same_minute_if_bid_above_cost(self, market, book, now):
-        """Sell a paper position when the bid is above paper cost, in any minute.
+        """Sell when the opening-minute bid clears cost, or flatten at any bid.
 
-        This does not wait for a sell he prints. A bid under paper cost does
-        not sell, including on the opening print, so the spread is not locked
-        in. The book must hold the full position. Missing size is not invented.
+        A new copy is not sold just because the bid is under the ask. While
+        the book is being flattened, the open shares sell into the bid even
+        when that bid is under paper cost. The book must hold the full position.
         """
         if not (self.config.get('strategy')=='paper_c' and self.config.get('sell_same_minute_if_bid_above_cost')):
             return None
@@ -665,9 +681,10 @@ class PaperJournal:
                 if not position or position['shares'] <= 0 or position['cost'] <= 0:
                     return None
                 opened = position.get('opened_at')
-                if opened is None:
+                flattening = self.flatten_required()
+                same_minute = opened is not None and int(D(opened)) // 60 == int(now) // 60
+                if not flattening and not same_minute:
                     return None
-                same_minute = int(D(opened)) // 60 == int(now) // 60
                 if book.get('market') != position['row'].get('condition_id'):
                     return None
                 age = D(now)*1000-D(book['timestamp'])
@@ -680,12 +697,12 @@ class PaperJournal:
                     return None
                 cost_per = position['cost']/quantity
                 try:
-                    fill = quote(book,'SELL',quantity,rate,cost_per)
+                    fill = quote(book,'SELL',quantity,rate, None if flattening else cost_per)
                 except ValueError:
                     return None
                 removed = position['cost']
                 net = fill['gross']-fill['fee']
-                if fill['vwap'] <= cost_per or net <= removed:
+                if not flattening and (fill['vwap'] <= cost_per or net <= removed):
                     return None
                 cash = self.cash+net
                 position['shares'] = ZERO
@@ -693,8 +710,8 @@ class PaperJournal:
                 self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
                 source_ts = position.get('opened_source_timestamp', position['row'].get('timestamp'))
                 latency = None if source_ts is None else round(now-int(source_ts), 3)
-                reason = ('same_minute_bid_above_paper_cost' if same_minute
-                          else 'any_minute_bid_above_paper_cost')
+                reason = ('flatten_open_position_at_bid' if flattening
+                          else 'same_minute_bid_above_paper_cost')
                 opening_hash = position['row'].get('transaction_hash')
                 decision = dict(status='PAPER_SELL',reason=reason,rule_skipped=False,
                                 paper=True,executed=False,side='SELL',slug=position['row'].get('slug'),
@@ -707,11 +724,17 @@ class PaperJournal:
                                 cost_per_share_usd=str(cost_per),cost_usd=str(removed),
                                 source_timestamp_seconds=source_ts,decision_latency_seconds=latency,
                                 seconds_from_start=self.seconds_from_start(now),
-                                latency_note=('The bid was above paper cost. This sell is not one of his prints. '
+                                latency_note=('The open position was sold into the bid so the book is flat. The bid did not have to clear paper cost. '
+                                              'Latency is his opening fill to this sell. The fee is shares times 0.07 times price times one minus price, taken in USDC.'
+                                              if flattening else
+                                              'The bid was above paper cost in the opening minute. This sell is not one of his prints. '
                                               'Latency is his opening fill to this sell. The fee is shares times 0.07 times price times one minus price, taken in USDC.'))
                 self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
                                 (token,json.dumps(position,default=str)))
                 held_after = sum((p['shares'] for p in self.holdings().values()), ZERO)
+                if flattening and held_after == 0:
+                    self.mark_book_flat()
+                    decision['book_flat'] = True
                 decision['cash_reached_goal'] = cash >= goal_amount(self.config)
                 if decision['cash_reached_goal']:
                     decision['seconds_from_start_to_75'] = decision.get('seconds_from_start')
@@ -721,8 +744,9 @@ class PaperJournal:
                     decision['goal_usd'] = str(goal_amount(self.config))
                     decision['equity_reached_goal'] = decision['cash_reached_goal']
                     decision['equity_reached_78'] = cash >= D('78')
-                exit_key = (f"same-minute:{token}:{int(D(opened))}" if same_minute
-                            else f"bank:{token}:{int(D(opened))}")
+                opened_key = 0 if opened is None else int(D(opened))
+                exit_key = (f"flatten:{token}:{opened_key}" if flattening
+                            else f"same-minute:{token}:{opened_key}")
                 self.db.execute('INSERT INTO seen VALUES (?,?)', (exit_key, json.dumps(decision)))
                 return decision
         except Exception:
@@ -949,7 +973,8 @@ def run_paper_c(args, config, journal, observer_start, source_start, resumed=Fal
             # Opening-minute books are checked on the poll. Later minutes are
             # checked about once a second so a resting bid does not refetch
             # the book on every activity tick.
-            if market is None and not force and not minute_position_open():
+            flattening = journal.flatten_required()
+            if market is None and not force and not minute_position_open() and not flattening:
                 if time.monotonic() - last_exit_check['at'] < 1:
                     return
                 last_exit_check['at'] = time.monotonic()
@@ -957,9 +982,12 @@ def run_paper_c(args, config, journal, observer_start, source_start, resumed=Fal
             if market is not None and book is not None:
                 books.append((market, book))
             else:
+                minute = int(time.time()) // 60
                 for token, position in list(journal.holdings().items()):
                     opened = position.get('opened_at')
-                    if position['shares'] <= 0 or opened is None:
+                    if position['shares'] <= 0:
+                        continue
+                    if not flattening and (opened is None or int(D(opened)) // 60 != minute):
                         continue
                     try:
                         market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
@@ -976,6 +1004,8 @@ def run_paper_c(args, config, journal, observer_start, source_start, resumed=Fal
                     emit(dict(status='ERROR',message=str(exc)))
 
         open_shares = sum((p['shares'] for p in journal.holdings().values()), ZERO)
+        if open_shares > 0:
+            journal.arm_flatten()
         fresh_book = journal.cash == D(config['starting_cash_usd']) and open_shares == 0
         price_rule = (not resumed) and fresh_book and D(config['starting_cash_usd']) == D('37.40')
         sample_reset = (bool(config.get('sell_same_minute_if_bid_above_cost'))
@@ -1022,12 +1052,10 @@ def run_paper_c(args, config, journal, observer_start, source_start, resumed=Fal
                       bank='any_minute_bid_above_paper_cost',
                       goal='cash_usd',
                       reset=False,
-                      why=('Cash fell under the last mark while copies used five shares instead of his printed size. '
-                           'Buys are his exact share count, same side and market, only at his price or better. '
-                           'Skip when that size is not on the book, the print is under five shares, the price is over 0.60, '
-                           'or the size costs more than cash. Do not invent a smaller fill. '
-                           'A bid above paper cost sells in any minute so the gain becomes cash. '
-                           'Cash and open positions were not reset. The goal is cash of $75.')))
+                      why=('The open position is sold into the first bid, even below paper cost, so the book is flat. '
+                           'No new position is opened until that sale is done. After that, copies are his exact prints '
+                           'and a gain sells in the same minute so cash stays locked. '
+                           'Cash and the goal timer were not reset. The goal is cash of $75.')))
         try:
             for window_index in range(1, args.windows+1):
                 if goal_box['hit']:
@@ -1116,6 +1144,11 @@ def run_paper_c(args, config, journal, observer_start, source_start, resumed=Fal
                                     under_five = False
                             if under_five:
                                 decision=journal.process(key,row,{},{},appeared)
+                                emit(decision)
+                                remember(window_index, decision)
+                                continue
+                            if row['side']=='BUY' and config.get('copy_buys_at_or_better') and journal.flatten_required():
+                                decision=journal.process(key,row,{},{},appeared,skip_reason='wait_for_flat_book')
                                 emit(decision)
                                 remember(window_index, decision)
                                 continue
