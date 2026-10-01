@@ -42,7 +42,8 @@ from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_CEILING
 from pathlib import Path
 from urllib.parse import quote as urlquote
 
-from bot import activity, array, decimal as D, get_json, market_timeframe, row_keys, source_skip, validate
+from bot import (activity, array, decimal as D, get_json, market_timeframe, public_client,
+                 RateLimited, row_keys, source_skip, validate)
 
 ZERO = Decimal(0)
 STEP = Decimal('0.01')
@@ -842,6 +843,16 @@ def run_paper_c(args, config, journal, observer_start, source_start):
             line=json.dumps(record)
             output.write(line+'\n');output.flush();print(line,flush=True)
 
+        announced_limits = {}
+
+        def note_rate_limit(exc):
+            key = (exc.host, exc.retry_at)
+            if announced_limits.get(exc.host) == key:
+                return
+            announced_limits[exc.host] = key
+            emit(dict(status='RATE_LIMIT', paper=True, executed=False, live_orders=False, host=exc.host,
+                      message='HTTP 429. The shared client is backing off and will not poll this host again until the backoff ends.'))
+
         def remember(window_index, decision):
             if decision.get('status')=='DUPLICATE' or decision.get('reason')=='resume_backlog_not_copied':
                 return
@@ -877,6 +888,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
             if market is not None and book is not None:
                 books.append((market, book))
             else:
+                if public_client.retry_at('clob.polymarket.com') is not None:
+                    return
                 minute = int(time.time()) // 60
                 for token, position in list(journal.holdings().items()):
                     opened = position.get('opened_at')
@@ -886,6 +899,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                         market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
                         book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
                         books.append((market_future.result(), book_future.result()))
+                    except RateLimited as exc:
+                        note_rate_limit(exc)
+                        return
                     except Exception as exc:
                         emit(dict(status='ERROR',message=str(exc),token_id=token))
             for market_row, book_row in books:
@@ -999,7 +1015,13 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                     # the ask is at his price or better. A sell with no
                                     # position is still skipped before that read.
                                     needs_book = sell_can_close or (row['side']=='BUY' and config.get('copy_buys_at_or_better'))
-                                    if needs_book:
+                                    book_limited = public_client.retry_at('clob.polymarket.com')
+                                    if needs_book and book_limited is not None:
+                                        note_rate_limit(RateLimited('clob.polymarket.com', book_limited))
+                                        decision=journal.process(key,row,{},{},appeared,skip_reason='rate_limited')
+                                        emit(decision)
+                                        remember(window_index, decision)
+                                    elif needs_book:
                                         market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(row['slug'],safe=''))
                                         book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':row['token_id']})
                                         market,book=market_future.result(),book_future.result()
@@ -1016,8 +1038,19 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                         decision=journal.process(key,row,{},{},appeared,skip_reason=reason)
                                         emit(decision)
                                         remember(window_index, decision)
+                            except RateLimited as exc:
+                                note_rate_limit(exc)
+                                decision=journal.process(key,row,{},{},appeared,skip_reason='rate_limited')
+                                emit(decision)
+                                remember(window_index, decision)
                             except Exception as exc:
                                 emit(dict(status='ERROR',message=str(exc),event_id=key))
+                    except RateLimited as exc:
+                        note_rate_limit(exc)
+                        remaining=args.duration-(time.monotonic()-window_started)
+                        pause=min(max(0, exc.retry_at-time.monotonic()), max(0, remaining))
+                        if pause > 0:
+                            time.sleep(pause)
                     except Exception as exc:
                         emit(dict(status='ERROR',message=str(exc)))
                         next_request=max(next_request,time.monotonic()+0.5)
