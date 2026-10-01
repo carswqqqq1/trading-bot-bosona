@@ -320,6 +320,47 @@ class PaperCTests(unittest.TestCase):
         self.addCleanup(journal.db.close)
         return journal
 
+    def test_only_a_btc_updown_5m_slug_can_be_copied(self):
+        journal = self.journal(copy_buys_at_or_better=True, starting_cash_usd="37.40",
+                               max_open_cost_usd="37.39", goal_usd="75")
+        self.assertEqual(journal.cash, Decimal("37.40"))
+        fifteen = f"btc-updown-15m-{START}"
+        skipped = journal.process(
+            "buy-15", row(slug=fifteen, price="0.40", size="10"),
+            market(slug=fifteen), book(asks=[{"price": "0.40", "size": "100"}]), NOW,
+        )
+        self.assertEqual(skipped["status"], "SKIP")
+        self.assertEqual(skipped["reason"], "not_btc_updown_5m")
+        self.assertEqual(journal.cash, Decimal("37.40"))
+        self.assertEqual(sum((p["shares"] for p in journal.holdings().values()), Decimal(0)), 0)
+        hourly = "bitcoin-up-or-down-october-1-2026-12am-et"
+        hourly_skip = journal.process(
+            "buy-hour",
+            row(slug=hourly, price="0.40", size="10", transaction_hash="0xhour"),
+            market(slug=hourly), book(), NOW,
+        )
+        self.assertEqual(hourly_skip["reason"], "not_btc_updown_5m")
+        self.assertEqual(journal.cash, Decimal("37.40"))
+        copied = journal.process(
+            "buy-5", row(price="0.50", size="10", transaction_hash="0x5"),
+            market(), book(), NOW,
+        )
+        self.assertEqual(copied["status"], "PAPER_BUY")
+        self.assertIn("btc-updown-5m", copied["slug"])
+        self.assertLessEqual(Decimal(copied["simulated_vwap"]), Decimal(copied["his_price"]))
+        worse = journal.process(
+            "buy-worse", row(price="0.40", size="10", transaction_hash="0xworse"),
+            market(), book(asks=[{"price": "0.41", "size": "100"}], bids=[{"price": "0.39", "size": "100"}]), NOW,
+        )
+        self.assertEqual(worse["status"], "SKIP")
+        self.assertEqual(worse["reason"], "latency_worse_than_leader_price")
+        self.assertEqual(paper.PAPER_C_GOAL, Decimal("75"))
+        raw = json.loads((Path(__file__).resolve().parent.parent / "config.paperc.json").read_text())
+        self.assertEqual(raw["starting_cash_usd"], "37.40")
+        self.assertEqual(raw["goal_usd"], "75")
+        self.assertEqual(raw["leader_wallet"], "0xc2ad03f79ca3f3c17d8c7de2612ce0c89b7d40ed")
+        self.assertLess(Decimal(raw["max_open_cost_usd"]), Decimal("37.40"))
+
     def test_buy_is_skipped_without_a_book_or_a_new_position(self):
         journal = self.journal()
         result = journal.process("buy-1", row(price="0.42"), None, None, NOW)
@@ -484,7 +525,7 @@ class PaperCTests(unittest.TestCase):
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
         self.assertGreater(Decimal(sold["realized_pnl_usd"]), 0)
         self.assertEqual(sold["unrealized_pnl_usd"], "0")
-        self.assertEqual(sold["equity_reached_78"], False)
+        self.assertEqual(sold["equity_reached_75"], False)
         self.assertEqual(sold["decision_latency_seconds"], 1)
         self.assertGreater(journal.cash, Decimal("39"))
         again = journal.realize_same_minute_if_bid_above_cost(market(), live, NOW)
@@ -592,8 +633,8 @@ class PaperCTests(unittest.TestCase):
         self.assertEqual(journal.cash, Decimal("35.94321"))
         self.assertEqual(sum((p["shares"] for p in journal.holdings().values()), Decimal(0)), 0)
         self.assertIsNone(by_outcome["Down"]["decision_latency_seconds"])
-        self.assertTrue(any(item.get("equity_reached_78") is False for item in closes))
-        self.assertFalse(any(item.get("equity_reached_78") is True for item in closes))
+        self.assertTrue(any(item.get("equity_reached_75") is False for item in closes))
+        self.assertFalse(any(item.get("equity_reached_75") is True for item in closes))
         report = journal.portfolio(lambda url, params=None: resolved)
         self.assertEqual(Decimal(report["realized_pnl_usd"]), Decimal("-3.05679"))
         self.assertEqual(report["unrealized_pnl_at_liquidation_quote_usd"], "0")
