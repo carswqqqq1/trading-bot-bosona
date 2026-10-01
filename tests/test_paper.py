@@ -28,9 +28,9 @@ def config(**overrides):
         "min_seconds_to_expiry": 5,
         "poll_seconds": 1,
         "starting_cash_usd": "48",
-        "max_buy_usd": "2.40",
+        "max_buy_usd": "5.00",
         "max_open_cost_usd": "9.60",
-        "max_outcome_cost_usd": "2.40",
+        "max_outcome_cost_usd": "5.00",
         "max_book_age_seconds": 5,
     }
     result.update(overrides)
@@ -83,7 +83,7 @@ def book(**overrides):
         "tick_size": "0.01",
         "min_order_size": "1",
         "asks": [{"price": "0.50", "size": "100"}, {"price": "0.51", "size": "100"}],
-        "bids": [{"price": "0.40", "size": "100"}],
+        "bids": [{"price": "0.49", "size": "100"}],
     }
     result.update(overrides)
     return result
@@ -98,7 +98,7 @@ class PaperJournalTests(unittest.TestCase):
         self.journal = paper.PaperJournal(self.path, self.config)
 
     def test_buy_charges_known_fee_and_costs_against_cash(self):
-        result = self.journal.process("buy-1", row(price="0.49"), market(), book(), NOW)
+        result = self.journal.process("buy-1", row(price="0.50"), market(), book(), NOW)
         self.assertEqual(result["status"], "PAPER_BUY")
         shares = Decimal(result["shares"])
         gross = Decimal(result["gross"])
@@ -109,11 +109,13 @@ class PaperJournalTests(unittest.TestCase):
         self.assertEqual(holding["shares"], shares)
         self.assertEqual(holding["cost"], gross + fee)
         self.assertLessEqual(holding["cost"], Decimal(self.config["max_buy_usd"]))
-        shares = Decimal(result["shares"])
-        self.assertEqual(Decimal(result["source_price"]), Decimal("0.49"))
+        self.assertEqual(Decimal(result["source_price"]), Decimal("0.50"))
         self.assertEqual(Decimal(result["simulated_vwap"]), Decimal("0.50"))
-        self.assertEqual(Decimal(result["source_price_slippage_cost_usd"]), shares * Decimal("0.01"))
-        source_fee = (shares * Decimal("0.1") * Decimal("0.49") * Decimal("0.51")).quantize(Decimal("0.00001"))
+        self.assertEqual(Decimal(result["his_price"]), Decimal("0.50"))
+        self.assertEqual(Decimal(result["our_price"]), Decimal("0.50"))
+        self.assertEqual(Decimal(result["cent_difference"]), Decimal("0"))
+        self.assertEqual(Decimal(result["source_price_slippage_cost_usd"]), Decimal("0"))
+        source_fee = (shares * Decimal("0.1") * Decimal("0.50") * Decimal("0.50")).quantize(Decimal("0.00001"))
         self.assertEqual(Decimal(result["source_price_fee_estimate_usd"]), source_fee)
         self.assertEqual(Decimal(result["fee_delta_vs_hypothetical_source_price_usd"]), fee - source_fee)
 
@@ -167,15 +169,19 @@ class PaperJournalTests(unittest.TestCase):
         self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"],0)
 
     def test_market_minimum_causes_skip_without_exceeding_cash_or_cost_cap(self):
+        tight = config(max_buy_usd="2.40", max_outcome_cost_usd="2.40")
+        journal = paper.PaperJournal(Path(self.tmp.name) / "tight.sqlite", tight)
+        self.addCleanup(journal.db.close)
         constrained = book(min_order_size="5")
-        result = self.journal.process("buy-too-small", row(), market(), constrained, NOW)
+        result = journal.process("buy-too-small", row(), market(), constrained, NOW)
         self.assertEqual(result["status"], "SKIP")
-        self.assertIn("below_market_minimum", result["reason"])
-        self.assertEqual(self.journal.cash, Decimal("48"))
-        self.assertEqual(self.journal.holdings()[TOKEN_UP]["cost"], 0)
+        self.assertEqual(result["reason"], "five_shares_exceed_per_buy_budget")
+        self.assertTrue(result["rule_skipped"])
+        self.assertEqual(journal.cash, Decimal("48"))
+        self.assertEqual(journal.holdings()[TOKEN_UP]["cost"], 0)
 
     def test_open_cost_cap_and_cash_are_never_exceeded(self):
-        self.config["max_open_cost_usd"] = "2.40"
+        self.config["max_open_cost_usd"] = "3.00"
         # Journal config is fixed at creation, so use a fresh journal for this policy.
         capped = paper.PaperJournal(Path(self.tmp.name) / "capped.sqlite", self.config)
         self.addCleanup(capped.db.close)
@@ -188,14 +194,16 @@ class PaperJournalTests(unittest.TestCase):
         self.assertEqual(first["status"], "PAPER_BUY")
         self.assertEqual(second["status"], "SKIP")
         self.assertGreaterEqual(capped.cash, 0)
-        self.assertLessEqual(sum((p["cost"] for p in capped.holdings().values()), Decimal(0)), Decimal("2.40"))
+        self.assertLessEqual(sum((p["cost"] for p in capped.holdings().values()), Decimal(0)), Decimal("3.00"))
+        self.assertEqual(second["reason"], "open_risk_cap")
 
     def test_optional_minimum_size_allowance_buys_only_required_quantity(self):
         policy = config(target_buy_usd="2.40",max_buy_usd="4.80",max_outcome_cost_usd="4.80")
         journal = paper.PaperJournal(Path(self.tmp.name)/"minimum.sqlite",policy)
         self.addCleanup(journal.db.close)
         result = journal.process("minimum",row(price="0.70"),market(),
-                                 book(min_order_size="5",asks=[{"price":"0.70","size":"100"}]),NOW)
+                                 book(min_order_size="5",asks=[{"price":"0.70","size":"100"}],
+                                      bids=[{"price":"0.69","size":"100"}]),NOW)
         self.assertEqual(result["status"],"PAPER_BUY")
         self.assertEqual(Decimal(result["shares"]),Decimal("5"))
         self.assertLessEqual(Decimal(result["gross"])+Decimal(result["fee"]),Decimal("4.80"))
@@ -205,7 +213,8 @@ class PaperJournalTests(unittest.TestCase):
         journal = paper.PaperJournal(Path(self.tmp.name)/"unaffordable.sqlite",policy)
         self.addCleanup(journal.db.close)
         result = journal.process("expensive",row(price="0.97"),market(),
-                                 book(min_order_size="5",asks=[{"price":"0.97","size":"100"}]),NOW)
+                                 book(min_order_size="5",asks=[{"price":"0.97","size":"100"}],
+                                      bids=[{"price":"0.96","size":"100"}]),NOW)
         self.assertEqual(result["status"],"SKIP")
         self.assertEqual(journal.cash,Decimal("48"))
         self.assertFalse(result["minimum_size_price_comparison"]["executed"])
@@ -238,6 +247,79 @@ class PaperJournalTests(unittest.TestCase):
         ))
         self.assertLess(Decimal(report["change_from_start_usd"]), 0)
         self.assertGreaterEqual(self.journal.cash, 0)
+
+    def test_buy_copies_his_side_at_five_shares_when_rules_pass(self):
+        result = self.journal.process("buy-1", row(price="0.50"), market(), book(), NOW)
+        self.assertEqual(result["status"], "PAPER_BUY")
+        self.assertFalse(result["rule_skipped"])
+        self.assertEqual(result["side"], "BUY")
+        self.assertEqual(result["slug"], row()["slug"])
+        self.assertEqual(Decimal(result["shares"]), Decimal("5"))
+        self.assertLessEqual(Decimal(result["simulated_vwap"]), Decimal(result["source_price"]))
+
+    def test_a_buy_above_85_cents_is_copied_when_the_book_matches_his_price(self):
+        result = self.journal.process(
+            "high", row(price="0.92"), market(),
+            book(asks=[{"price": "0.92", "size": "100"}], bids=[{"price": "0.90", "size": "100"}]),
+            NOW,
+        )
+        self.assertEqual(result["status"], "PAPER_BUY")
+        self.assertFalse(result["rule_skipped"])
+        self.assertEqual(result["slug"], row()["slug"])
+        self.assertEqual(result["side"], "BUY")
+        self.assertLessEqual(Decimal(result["simulated_vwap"]), Decimal("0.92"))
+        self.assertLessEqual(Decimal(result["cent_difference"]), 0)
+
+    def test_non_btc_and_four_hour_markets_are_skipped(self):
+        eth = self.journal.process(
+            "eth", row(slug="eth-updown-5m-999", transaction_hash="0xeth"), market(), book(), NOW,
+        )
+        self.assertEqual(eth["status"], "SKIP")
+        self.assertEqual(eth["reason"], "different_market_or_timeframe")
+        self.assertEqual(self.journal.cash, Decimal("48"))
+        four = self.journal.process(
+            "4h", row(slug="btc-updown-4h-1790812800", transaction_hash="0x4h"), market(), book(), NOW,
+        )
+        self.assertEqual(four["status"], "SKIP")
+        self.assertEqual(four["reason"], "different_market_or_timeframe")
+        self.assertEqual(four["slug"], "btc-updown-4h-1790812800")
+
+    def test_paying_above_his_fill_is_skipped_without_a_debit(self):
+        late = self.journal.process(
+            "late", row(price="0.50"), market(),
+            book(asks=[{"price": "0.51", "size": "100"}], bids=[{"price": "0.49", "size": "100"}]), NOW,
+        )
+        self.assertEqual(late["status"], "SKIP")
+        self.assertEqual(late["reason"], "latency_worse_than_leader_price")
+        self.assertTrue(late["rule_skipped"])
+        self.assertEqual(late["slug"], row()["slug"])
+        self.assertGreater(Decimal(late["cent_difference"]), 0)
+        self.assertEqual(self.journal.cash, Decimal("48"))
+        better = self.journal.process(
+            "better", row(transaction_hash="0xbetter", price="0.52"), market(), book(), NOW,
+        )
+        self.assertEqual(better["status"], "PAPER_BUY")
+        self.assertFalse(better["rule_skipped"])
+        self.assertLessEqual(Decimal(better["simulated_vwap"]), Decimal("0.52"))
+
+    def test_exit_realizes_a_gain_when_bid_is_above_paper_cost(self):
+        bought = self.journal.process("buy-1", row(price="0.50"), market(), book(), NOW)
+        self.assertEqual(bought["status"], "PAPER_BUY")
+        held = self.journal.realize_if_bid_above_cost(
+            market(), book(timestamp=NOW * 1000, bids=[{"price": "0.50", "size": "100"}]), NOW,
+        )
+        self.assertIsNone(held)
+        self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"], Decimal(bought["shares"]))
+        exited = self.journal.realize_if_bid_above_cost(
+            market(), book(timestamp=NOW * 1000, bids=[{"price": "0.60", "size": "100"}]), NOW,
+        )
+        self.assertEqual(exited["status"], "PAPER_SELL")
+        self.assertEqual(exited["reason"], "bid_above_paper_cost")
+        self.assertGreater(Decimal(exited["realized_pnl_usd"]), 0)
+        self.assertEqual(self.journal.holdings()[TOKEN_UP]["shares"], 0)
+        self.assertGreater(self.journal.cash, Decimal("48") - Decimal(bought["gross"]) - Decimal(bought["fee"]))
+        report = self.journal.portfolio(lambda url, params=None: market() if "/markets/slug/" in url else book(timestamp=NOW * 1000))
+        self.assertGreater(Decimal(report["realized_pnl_usd"]), 0)
 
 
 if __name__ == "__main__":
