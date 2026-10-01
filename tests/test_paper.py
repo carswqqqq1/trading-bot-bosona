@@ -703,6 +703,37 @@ class PaperCTests(unittest.TestCase):
         self.assertGreater(Decimal(sold["realized_pnl_usd"]), 0)
         self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
 
+    def test_open_position_sells_into_a_bid_below_cost_before_a_new_buy(self):
+        journal = self.journal(copy_buys_at_or_better=True, sell_same_minute_if_bid_above_cost=True)
+        seed_position(journal, "10", "6")
+        journal.flatten_tokens = {TOKEN_UP}
+        below = book(bids=[{"price": "0.40", "size": "100"}], asks=[{"price": "0.55", "size": "100"}])
+        blocked = journal.process("buy-while-open", row(price="0.50", size="10"), market(), below, NOW)
+        self.assertEqual(blocked["status"], "SKIP")
+        self.assertEqual(blocked["reason"], "open_position_not_yet_sold")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], Decimal("10"))
+        self.assertEqual(journal.cash, Decimal("39"))
+        sold = journal.lock_into_cash_at_bid(market(), below, NOW)
+        self.assertEqual(sold["status"], "PAPER_SELL")
+        self.assertEqual(sold["reason"], "lock_open_position_into_cash")
+        self.assertEqual(sold["fee_collected_in"], "usdc")
+        self.assertEqual(Decimal(sold["fee_rate"]), Decimal("0.07"))
+        self.assertEqual(Decimal(sold["fee"]), Decimal("0.16800"))
+        self.assertLess(Decimal(sold["realized_pnl_usd"]), 0)
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+        journal.flatten_tokens = set()
+        copied = journal.process("buy-after-flat", row(price="0.50", size="10", transaction_hash="0xafter"), market(), book(), NOW)
+        self.assertEqual(copied["status"], "PAPER_BUY")
+        locked = journal.lock_into_cash_at_bid(market(), below, NOW)
+        self.assertEqual(locked["reason"], "same_minute_lock_cash_at_bid")
+        self.assertEqual(journal.holdings()[TOKEN_UP]["shares"], 0)
+        later_book = book(timestamp=(NOW + 60) * 1000, bids=[{"price": "0.40", "size": "100"}],
+                          asks=[{"price": "0.50", "size": "100"}])
+        fresh = self.journal(copy_buys_at_or_better=True, sell_same_minute_if_bid_above_cost=True)
+        fresh.process("buy-hold", row(price="0.50", size="10", transaction_hash="0xhold"), market(), book(), NOW)
+        self.assertIsNone(fresh.lock_into_cash_at_bid(market(), later_book, NOW + 60))
+        self.assertGreater(fresh.holdings()[TOKEN_UP]["shares"], 0)
+
     def test_one_fill_is_claimed_once_across_websocket_and_poll(self):
         rest = row(size="131.54", timestamp=NOW, usdc_size="88.88263")
         live = dict(rest, timestamp=NOW * 1000, usdc_size="1")

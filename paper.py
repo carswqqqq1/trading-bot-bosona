@@ -303,6 +303,7 @@ class PaperJournal:
         # Runtime only. Writing this into the stored config would reject the book
         # on the next start, because the file config would no longer match.
         self.sell_above_cost_while_losing = False
+        self.flatten_tokens = set()
         self.db = sqlite3.connect(path)
         self.db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY,payload TEXT)')
@@ -391,6 +392,9 @@ class PaperJournal:
                 if (self.config.get('strategy')=='paper_c' and row['side']=='BUY'
                         and not self.config.get('copy_buys_at_or_better')):
                     raise ValueError('paper_c_no_new_buys')
+                if (self.config.get('strategy')=='paper_c' and row['side']=='BUY'
+                        and self._flatten_still_open()):
+                    raise ValueError('open_position_not_yet_sold')
                 reason = market_check(row,market,book,self.config,now)
                 if reason:
                     raise ValueError(reason)
@@ -679,6 +683,87 @@ class PaperJournal:
                     decision['goal_reached'] = cash >= paper_goal(self.config)
                 self.db.execute('INSERT INTO seen VALUES (?,?)',
                                 (f"same-minute:{token}:{int(D(opened))}",json.dumps(decision)))
+                return decision
+        except Exception:
+            return None
+
+    def _flatten_still_open(self):
+        if not self.flatten_tokens:
+            return False
+        held = self.holdings()
+        return any(held.get(token, {}).get('shares', ZERO) > 0 for token in self.flatten_tokens)
+
+    def lock_into_cash_at_bid(self, market, book, now):
+        """Sell paper shares into the bid so cash is the result.
+
+        A position that was already open sells in any minute. A position opened
+        during this run sells in that same minute. The bid does not have to
+        clear paper cost. No new price is invented when the book has no bid.
+        """
+        if self.config.get('strategy') != 'paper_c':
+            return None
+        token = str(book.get('asset_id') or '')
+        try:
+            with self.db:
+                self.db.execute('BEGIN IMMEDIATE')
+                position = self.holdings().get(token)
+                if not position or position['shares'] <= 0 or position['cost'] <= 0:
+                    return None
+                opened = position.get('opened_at')
+                flattening = token in self.flatten_tokens
+                same_minute = opened is not None and int(D(opened)) // 60 == int(now) // 60
+                if not flattening and not same_minute:
+                    return None
+                if book.get('market') != position['row'].get('condition_id'):
+                    return None
+                age = D(now)*1000-D(book['timestamp'])
+                if age < -1000 or age > D(self.config['max_book_age_seconds'])*1000:
+                    return None
+                rate = taker_fee_rate(market, position['row'].get('slug'))
+                minimum = D(book['min_order_size'])
+                if minimum <= 0:
+                    return None
+                bids = levels(book, 'SELL')
+                if not bids:
+                    return None
+                available = sum((size for _, size in bids), ZERO)
+                quantity = min(position['shares'], available)
+                if quantity < minimum or quantity <= 0:
+                    return None
+                fill = quote(book, 'SELL', quantity, rate)
+                removed = position['cost']*quantity/position['shares']
+                net = fill['gross']-fill['fee']
+                cash = self.cash+net
+                position['shares'] -= quantity
+                position['cost'] -= removed
+                if position['shares'] == 0:
+                    position['cost'] = ZERO
+                self.db.execute("UPDATE meta SET value=? WHERE key='cash'",(str(cash),))
+                source_ts = position.get('opened_source_timestamp', position['row'].get('timestamp'))
+                latency = None if source_ts is None else round(now-int(source_ts), 3)
+                reason = 'lock_open_position_into_cash' if flattening else 'same_minute_lock_cash_at_bid'
+                decision = dict(status='PAPER_SELL',reason=reason,rule_skipped=False,
+                                paper=True,executed=False,side='SELL',slug=position['row'].get('slug'),
+                                outcome=position['row'].get('outcome'),token_id=token,
+                                shares=str(quantity),gross=str(fill['gross']),fee=str(fill['fee']),
+                                fee_collected_in='usdc',fee_rate=str(rate),
+                                vwap=str(fill['vwap']),our_price=str(fill['vwap']),his_price=None,cent_gap=None,
+                                realized_pnl_usd=str(net-removed),cash_usd=str(cash),
+                                held_shares=str(position['shares']),
+                                cost_per_share_usd=str(removed/quantity),cost_usd=str(removed),
+                                source_timestamp_seconds=source_ts,decision_latency_seconds=latency,
+                                latency_note='Sold into the bid so the cash number is the result. This is not one of his prints.')
+                self.db.execute('INSERT OR REPLACE INTO positions VALUES (?,?)',
+                                (token,json.dumps(position,default=str)))
+                held_after = sum((p['shares'] for p in self.holdings().values()), ZERO)
+                if held_after == 0:
+                    decision['unrealized_pnl_usd'] = '0'
+                    decision['equity_usd'] = str(cash)
+                    decision['equity_reached_78'] = cash >= D('78')
+                    decision['goal_usd'] = str(paper_goal(self.config))
+                    decision['goal_reached'] = cash >= paper_goal(self.config)
+                self.db.execute('INSERT INTO seen VALUES (?,?)',
+                                (f"lock:{token}:{now}:{quantity}",json.dumps(decision)))
                 return decision
         except Exception:
             return None
@@ -1055,13 +1140,39 @@ def run_paper_c(args, config, journal, observer_start, source_start):
 
         loss_checked = 0
 
+        def lock_open_book(window_index):
+            """Sell an already-open position at the bid, and a new one in its opening minute."""
+            nonlocal loss_checked
+            if loss_checked and time.monotonic()-loss_checked < 1:
+                return
+            loss_checked = time.monotonic()
+            for token, position in list(journal.holdings().items()):
+                if position['shares'] <= 0:
+                    continue
+                opened = position.get('opened_at')
+                same_minute = opened is not None and int(D(opened)) // 60 == int(time.time()) // 60
+                if token not in journal.flatten_tokens and not same_minute:
+                    continue
+                try:
+                    market_future=pool.submit(get_json,'https://gamma-api.polymarket.com/markets/slug/'+urlquote(position['row']['slug'],safe=''))
+                    book_future=pool.submit(get_json,'https://clob.polymarket.com/book',{'token_id':token})
+                    note_same_minute_sell(
+                        journal.lock_into_cash_at_bid(market_future.result(), book_future.result(), time.time()),
+                        window_index)
+                except RateLimited:
+                    raise
+                except Exception as exc:
+                    emit(dict(status='ERROR',message=str(exc),token_id=token))
+
         def sell_while_losing(window_index):
-            """His print is the only sell. A bid is not turned into a fill."""
-            return
+            lock_open_book(window_index)
 
         def sell_same_minute(window_index, market=None, book=None):
-            """His print is the only sell. A bid is not turned into a fill."""
-            return
+            if market is not None and book is not None:
+                note_same_minute_sell(
+                    journal.lock_into_cash_at_bid(market, book, time.time()), window_index)
+                return
+            lock_open_book(window_index)
 
         open_shares = sum((p['shares'] for p in journal.holdings().values()), ZERO)
         sample_reset = (bool(config.get('sell_same_minute_if_bid_above_cost'))
@@ -1069,7 +1180,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
         buy_filter = ('copy his printed share count, same side and market, only when that size fills at his price or better; '
                       'skip when that size is not on the book, is under 5 shares, or a buy costs more than cash; '
                       'a new buy pays the taker fee in shares and a new sell pays it from USDC proceeds; '
-                      'copy a sell he prints for his size only when it closes paper shares above paper cost')
+                      'copy a sell he prints for his size only when it closes paper shares above paper cost; '
+                      'sell shares already open into the first bid, even below paper cost, and do not buy again until that book is flat; '
+                      'sell a new position in the minute it opens so the cash stays locked')
         emit(dict(status='STARTED',strategy='paper_c',paper=True,executed=False,live_orders=False,
                   leader_wallet=config['leader_wallet'],starting_cash_usd=str(config['starting_cash_usd']),
                   resumed_cash_usd=str(journal.cash),
@@ -1105,6 +1218,11 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                       cash_usd=str(journal.cash),equity_usd=str(opening_equity),
                       rule='sell_above_cost_while_losing',
                       note='Equity is under the starting cash, so a bid above paper cost sells even after the opening minute.'))
+        journal.flatten_tokens = {token for token, pos in journal.holdings().items() if pos['shares'] > 0}
+        if journal.flatten_tokens:
+            emit(dict(status='LOCK_CASH',paper=True,executed=False,
+                      cash_usd=str(journal.cash),open_tokens=len(journal.flatten_tokens),
+                      note='Open shares sell into the first bid, even below paper cost. No new buy until the book is flat.'))
         for (payload,) in journal.db.execute('SELECT payload FROM seen'):
             try:
                 journal.claim(trade_ident(json.loads(payload)))
