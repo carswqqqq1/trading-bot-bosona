@@ -15,11 +15,13 @@ one burst cannot spend the whole account. These rules do not guarantee a profit.
 strategy "paper_c" is a separate filter. A sell is copied only when it
 closes an existing paper position above paper cost. With no matching position
 the sell is skipped when it appears. copy_buys_at_or_better copies his buy on
-the same side and market, for the same number of shares, only when that full
-size fills at his price or better. A better full-size price is a copy. A
-5-share quote is not that price. The market minimum is still 5 shares.
-If that size costs more than the cash on hand, the buy is skipped and is not
-scaled down. sell_same_minute_if_bid_above_cost is the one added rule: in the
+the same side and market, for his full size, only when that full size fills
+at his price or better. A better full-size price is a copy. A 5-share quote
+is not that price. The market minimum is still 5 shares. If that size costs
+more than the cash on hand, the buy is skipped and is not scaled down. The
+copy is a taker. On a new buy the fee is taken in shares, so the held count
+is his size minus fee divided by price. On a sell the fee comes out of the
+USDC proceeds. A resolution is not a fill and has no fee. Makers pay nothing. sell_same_minute_if_bid_above_cost is the one added rule: in the
 same minute a paper position opens, a bid above paper cost sells that position
 without waiting for a sell he prints. Decision latency is his fill timestamp to
 that copy or skip. The paper48 path is unchanged.
@@ -55,6 +57,47 @@ def fee_rate(market):
     return rate
 
 
+def taker_fee_usdc(shares, rate, price):
+    """Taker fee in USDC. Rounded to 5 decimals; anything under 0.00001 is 0."""
+    raw = shares * rate * price * (1 - price)
+    if raw < Decimal('0.00001'):
+        return ZERO
+    fee = raw.quantize(Decimal('0.00001'), rounding=ROUND_HALF_UP)
+    if fee < Decimal('0.00001'):
+        return ZERO
+    return fee
+
+
+def taker_fee_rate(market, slug=None):
+    """Taker rate for a new paper fill. Makers pay nothing and there is no rebate.
+
+    Bitcoin up-or-down markets are crypto, so the rate is 0.07 unless the
+    market's own fee fields name a different taker rate. Fees off, or a
+    geopolitics market, charge 0.
+    """
+    market = market if isinstance(market, dict) else {}
+    if market.get('feesEnabled') is False:
+        return ZERO
+    labels = [str(market.get(key) or '') for key in ('category', 'feeType', 'slug')]
+    tags = market.get('tags') or []
+    if isinstance(tags, list):
+        labels.extend(str(tag.get('label') if isinstance(tag, dict) else tag) for tag in tags)
+    if slug:
+        labels.append(str(slug))
+    if 'geopolitic' in ' '.join(labels).lower():
+        return ZERO
+    schedule = market.get('feeSchedule') or {}
+    if schedule.get('rate') is not None:
+        rate = D(schedule['rate'])
+        if not 0 <= rate <= 1:
+            raise ValueError('invalid_fee_rate')
+        return rate
+    name = str(slug or market.get('slug') or '')
+    if name.startswith('btc-updown-') or name.startswith('bitcoin-up-or-down-'):
+        return Decimal('0.07')
+    return fee_rate(market)
+
+
 def levels(book, side, limit=None):
     result = []
     for entry in book['asks' if side == 'BUY' else 'bids']:
@@ -70,19 +113,21 @@ def quote(book, side, quantity, rate, limit=None):
     """Full depth fill only; fees round per consumed price level to five decimals."""
     if side not in ('BUY', 'SELL') or quantity <= 0:
         raise ValueError('invalid_quantity_or_side')
-    remaining, gross, fees = quantity, ZERO, ZERO
+    remaining, gross, fees, share_fee = quantity, ZERO, ZERO, ZERO
     for price, available in levels(book, side, limit):
         take = min(remaining, available)
         if take <= 0:
             continue
         gross += take * price
-        fees += (take * rate * price * (1-price)).quantize(Decimal('.00001'), rounding=ROUND_HALF_UP)
+        level_fee = taker_fee_usdc(take, rate, price)
+        fees += level_fee
+        share_fee += level_fee / price
         remaining -= take
         if remaining == 0:
             break
     if remaining:
         raise ValueError('insufficient_depth')
-    return dict(shares=quantity, gross=gross, fee=fees, vwap=gross/quantity)
+    return dict(shares=quantity, gross=gross, fee=fees, share_fee=share_fee, vwap=gross/quantity)
 
 
 FIVE = Decimal('5')
@@ -294,7 +339,8 @@ class PaperJournal:
                 reason = market_check(row,market,book,self.config,now)
                 if reason:
                     raise ValueError(reason)
-                rate = fee_rate(market)
+                rate = (taker_fee_rate(market, row.get('slug'))
+                        if self.config.get('strategy')=='paper_c' else fee_rate(market))
                 minimum = D(book['min_order_size'])
                 tick = D(book['tick_size'])
                 if minimum <= 0 or tick <= 0:
@@ -360,13 +406,21 @@ class PaperJournal:
                     decision['simulated_vwap'] = str(fill['vwap'])
                     if fill['vwap'] > source_price:
                         raise ValueError('latency_worse_than_leader_price')
-                    debit = fill['gross']+fill['fee']
+                    # The book must hold his full size. The taker fee is then
+                    # taken in shares, not as extra USDC and not as a rebate.
+                    received = quantity - fill['share_fee']
+                    if received <= 0:
+                        raise ValueError('taker_fee_consumed_the_shares')
+                    debit = fill['gross']
                     if debit > self.cash:
                         raise ValueError('his_size_exceeds_cash')
                     cash = self.cash-debit
                     opening = position['shares'] == 0
-                    position['shares'] += quantity
+                    position['shares'] += received
                     position['cost'] += debit
+                    fill = dict(fill, shares=received)
+                    decision['fee_collected_in'] = 'shares'
+                    decision['share_fee'] = str(fill['share_fee'])
                     if opening:
                         position['opened_at'] = now
                         position['opened_source_timestamp'] = row['timestamp']
@@ -518,10 +572,10 @@ class PaperJournal:
                 age = D(now)*1000-D(book['timestamp'])
                 if age < -1000 or age > D(self.config['max_book_age_seconds'])*1000:
                     return None
-                rate = fee_rate(market)
+                rate = taker_fee_rate(market, position['row'].get('slug'))
                 minimum = D(book['min_order_size'])
                 quantity = position['shares']
-                if minimum <= 0 or quantity < minimum:
+                if minimum <= 0 or quantity <= 0:
                     return None
                 cost_per = position['cost']/quantity
                 try:
@@ -574,9 +628,13 @@ class PaperJournal:
                 reason = market_check(row,market,book,self.config,time.time())
                 if reason:
                     raise ValueError(reason)
-                if p['shares'] < D(book['min_order_size']):
+                # A taker buy can leave fewer shares than the market minimum.
+                # Quote that held size when the book has it. Do not invent the rest.
+                if self.config.get('strategy')!='paper_c' and p['shares'] < D(book['min_order_size']):
                     raise ValueError('holding_below_sell_minimum')
-                fill = quote(book,'SELL',p['shares'],fee_rate(market))
+                rate = (taker_fee_rate(market, p['row'].get('slug'))
+                        if self.config.get('strategy')=='paper_c' else fee_rate(market))
+                fill = quote(book,'SELL',p['shares'],rate)
                 value = fill['gross']-fill['fee']
                 marked += value
                 record['liquidation_quote_usd'] = str(value)
@@ -701,6 +759,8 @@ def decision_view(decision, window):
                 cent_gap=decision.get('cent_gap'),realized_pnl_usd=decision.get('realized_pnl_usd','0'),
                 unrealized_pnl_usd=decision.get('unrealized_pnl_usd'),
                 decision_latency_seconds=decision.get('decision_latency_seconds'),
+                fee_usd=decision.get('fee'),fee_collected_in=decision.get('fee_collected_in'),
+                share_fee=decision.get('share_fee'),
                 copied_sell=decision.get('status')=='PAPER_SELL',rule_skipped=decision.get('rule_skipped'),
                 price_note=decision.get('price_note'))
 
@@ -774,6 +834,7 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                         and journal.cash == D(config['starting_cash_usd']) and open_shares == 0)
         buy_filter = ('copy his exact share count, same side and market, only when the full size fills at his price or better; '
                       'skip when that size is not on the book or costs more than cash; '
+                      'a new buy pays the taker fee in shares and a new sell pays it from USDC proceeds; '
                       'copy a sell he prints only when it closes an existing paper position above paper cost')
         if config.get('sell_same_minute_if_bid_above_cost'):
             buy_filter += '; in the opening minute, sell when the bid is above paper cost without waiting for his sell'
@@ -933,6 +994,9 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                                                    our_price=view['our_price'],cent_gap=view['cent_gap'],
                                                    realized_pnl_usd=view['realized_pnl_usd'],
                                                    unrealized_pnl_usd=view['unrealized_pnl_usd'],
+                                                   fee_usd=view.get('fee_usd'),
+                                                   fee_collected_in=view.get('fee_collected_in'),
+                                                   share_fee=view.get('share_fee'),
                                                    latency_seconds=view['decision_latency_seconds'])
                                               for window in windows for view in window['decisions']],
                     reset_to_39=rule_reset is not None or sample_reset,
@@ -958,6 +1022,8 @@ def run_paper_c(args, config, journal, observer_start, source_start):
                     latency_definition='seconds from his fill timestamp to the paper copy or skip',
                     filter=('Copy his exact share count, same side and market, only when the full size fills at his price or better. '
                             'Skip that buy when the size is not on the book or costs more than the cash on hand; do not scale it down. The market minimum is 5 shares. '
+                            'A new fill is a taker. The fee is shares times feeRate times price times one minus price, rounded to five decimals. '
+                            'On a buy that fee is taken in shares. On a sell it comes out of the USDC proceeds. A resolution has no fee. '
                             'Copy a sell he prints only when it closes an existing paper position above paper cost. '
                             'In the same minute a position opens, sell it when the bid is above paper cost without waiting for a sell he prints.'
                             if config.get('sell_same_minute_if_bid_above_cost') else
